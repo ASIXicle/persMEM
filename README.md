@@ -311,7 +311,7 @@ AMQ_AGENTS = {"kite", "wren", "new_agent"}
 
 ---
 
-## Chorus: Browser Extension /STILL TESTING/WILL ADD
+## Chorus: Browser Extension
 
 ### Overview
 
