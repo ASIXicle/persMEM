@@ -5,7 +5,7 @@
 
 Data and self-reported findings:
 
-[Research Report #1, 04/11/2026](docs/persmem-research-report-1.0)
+[Research Report #1, 04/11/2026](docs/persmem-research-report-1.0.md)
 
 A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration capabilities using commodity hardware. Built on ChromaDB vector search, FastMCP tool serving, Maildir-style message queuing, and browser-based prompt automation.
 
