@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "Chorus",
+  "version": "0.1.0",
+  "description": "Dual-instance Claude prompt relay with AMQ exchange loop",
+  "permissions": [
+    "tabs",
+    "storage",
+    "activeTab"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://claude.ai/*"],
+      "js": ["selectors.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "sidebar_action": {
+    "default_title": "Chorus",
+    "default_panel": "sidebar.html",
+    "default_icon": "icon.svg"
+  },
+  "icons": {
+    "48": "icon.svg"
+  }
+}
