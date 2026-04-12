@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""
+persMEM Dashboard -- Read-only viewer for Claude's memory + live AMQ feed.
+Runs on the persMEM LXC, accessible on LAN only.
+
+ENVIRONMENT VARIABLES:
+    PERSMEM_AMQ_AGENTS - Comma-separated agent names (default: "agent_a,agent_b")
+
+Serves on 0.0.0.0:9090 by default.
+"""
+
+import os
+import json
+from datetime import datetime, timezone
+from collections import Counter
+
+from flask import Flask, render_template_string, request, jsonify, make_response
+import chromadb
+
+# --- Config ---
+CHROMADB_PATH = "/var/lib/persmem/chromadb"
+COLLECTION_NAME = "memories"
+AMQ_ROOT = "/home/persmem/amq"
+AMQ_AGENTS = os.environ.get("PERSMEM_AMQ_AGENTS", "agent_a,agent_b").split(",")
+HOST = "0.0.0.0"
+PORT = 9090
+
+app = Flask(__name__, static_folder="/opt/persmem-dashboard", static_url_path="/static")
+
+
+def get_collection():
+    client = chromadb.PersistentClient(path=CHROMADB_PATH)
+    return client.get_collection(COLLECTION_NAME)
+
+
+def get_all_memories():
+    col = get_collection()
+    total = col.count()
+    if total == 0:
+        return []
+    results = col.get(include=["documents", "metadatas"])
+    memories = []
+    for doc, meta in zip(results["documents"], results["metadatas"]):
+        memories.append({"id": results["ids"][len(memories)], "content": doc, **meta})
+    return memories
+
+
+def get_amq_messages():
+    """Read all AMQ messages from both agents' inboxes (new + cur)."""
+    messages = []
+    for agent in AMQ_AGENTS:
+        for subdir in ["new", "cur"]:
+            dirpath = os.path.join(AMQ_ROOT, agent, "inbox", subdir)
+            try:
+                files = os.listdir(dirpath)
+            except OSError:
+                continue
+            for fname in files:
+                if not fname.endswith(".md"):
+                    continue
+                filepath = os.path.join(dirpath, fname)
+                try:
+                    with open(filepath, "r") as f:
+                        content = f.read()
+                    parts = content.split("---json\n", 1)
+                    if len(parts) < 2:
+                        continue
+                    rest = parts[1].split("\n---\n", 1)
+                    if len(rest) < 2:
+                        continue
+                    headers = json.loads(rest[0])
+                    headers["body"] = rest[1].strip()
+                    headers["status"] = "unread" if subdir == "new" else "read"
+                    headers["recipient"] = agent
+                    messages.append(headers)
+                except Exception:
+                    continue
+    messages.sort(key=lambda m: m.get("created", ""))
+    return messages
+
+
+# NOTE: The dashboard HTML template uses CSS variables and class names
+# based on agent names (e.g., --agent_a-color, .from-agent_a).
+# If you change agent names, update the CSS variables and JS references
+# in the DASHBOARD_HTML template below to match.
+#
+# The template is large (~460 lines of inline HTML/CSS/JS).
+# Key customization points:
+#   - CSS :root variables for agent colors (lines ~101-106)
+#   - AMQ feed rendering in renderAmqFeed() JS function
+#   - Timezone constant TZ (default: America/Chicago)
+
+DASHBOARD_HTML = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>persMEM Dashboard</title>
+<script src="/static/chart.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff; --surface: #f6f8fa; --surface2: #eef1f5;
+    --border: #d1d9e0; --text: #1f2328; --text-dim: #656d76;
+    --accent: #58a6ff; --accent2: #bc8cff; --accent3: #7ee787;
+    --accent4: #ffa657; --accent5: #ff7b72; --accent6: #79c0ff;
+    /* Agent colors — customize per your agent names */
+    --agent_a-color: #58a6ff;
+    --agent_a-bg: rgba(88, 166, 255, 0.08);
+    --agent_a-border: rgba(88, 166, 255, 0.25);
+    --agent_b-color: #bc8cff;
+    --agent_b-bg: rgba(188, 140, 255, 0.08);
+    --agent_b-border: rgba(188, 140, 255, 0.25);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.5; padding: 24px; }
+  h1 { font-size: 28px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--text-dim); font-size: 14px; margin-bottom: 24px; }
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; text-align: center; }
+  .stat-card .number { font-size: 36px; font-weight: 700; color: var(--accent); }
+  .stat-card .label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+  .charts-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .chart-wrap { position: relative; max-width: 280px; margin: 0 auto; }
+  .amq-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; }
+  .amq-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .amq-header h3 { font-size: 14px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .amq-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #7ee787; display: inline-block; margin-right: 6px; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .amq-status { font-size: 12px; color: var(--text-dim); }
+  .amq-feed { max-height: 600px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
+  .amq-msg { padding: 12px 16px; border-radius: 8px; border: 1px solid; cursor: pointer; transition: border-color 0.15s; }
+  .amq-msg:hover { filter: brightness(0.97); }
+  .amq-msg.expanded .amq-body { display: block; }
+  .amq-msg.from-agent_a { background: var(--agent_a-bg); border-color: var(--agent_a-border); }
+  .amq-msg.from-agent_b { background: var(--agent_b-bg); border-color: var(--agent_b-border); }
+  .amq-msg.unread { border-width: 2px; }
+  .amq-msg-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .amq-sender { font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .amq-sender.agent_a { color: var(--agent_a-color); }
+  .amq-sender.agent_b { color: var(--agent_b-color); }
+  .amq-arrow { font-size: 12px; color: var(--text-dim); }
+  .amq-recipient { font-size: 12px; color: var(--text-dim); font-weight: 600; }
+  .amq-subject { font-size: 13px; color: var(--text); flex: 1; }
+  .amq-time { font-size: 11px; color: var(--text-dim); margin-left: auto; white-space: nowrap; }
+  .amq-kind { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: rgba(255,255,255,0.5); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+  .amq-unread-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--accent5); color: white; font-weight: 600; }
+  .amq-body { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+  .amq-empty { text-align: center; padding: 40px; color: var(--text-dim); font-style: italic; }
+  .amq-count-row { display: flex; gap: 16px; margin-bottom: 12px; }
+  .amq-count-badge { font-size: 12px; padding: 4px 12px; border-radius: 12px; font-weight: 600; }
+  .amq-count-badge.agent_a { background: var(--agent_a-bg); color: var(--agent_a-color); border: 1px solid var(--agent_a-border); }
+  .amq-count-badge.agent_b { background: var(--agent_b-bg); color: var(--agent_b-color); border: 1px solid var(--agent_b-border); }
+  .search-bar { display: flex; gap: 8px; margin-bottom: 24px; }
+  .search-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; }
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar input::placeholder { color: var(--text-dim); }
+  .filter-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .filter-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 4px 14px; color: var(--text-dim); font-size: 13px; cursor: pointer; transition: all 0.15s; }
+  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--accent); background: var(--surface2); }
+  .memory-list { display: flex; flex-direction: column; gap: 12px; }
+  .memory-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; cursor: pointer; transition: border-color 0.15s; }
+  .memory-card:hover { border-color: var(--accent); }
+  .memory-card.expanded .memory-content { display: block; }
+  .memory-meta { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .badge-project { background: rgba(188, 140, 255, 0.15); color: var(--accent2); }
+  .badge-type { background: rgba(126, 231, 135, 0.15); color: var(--accent3); }
+  .badge-tag { background: rgba(255, 166, 87, 0.12); color: var(--accent4); font-weight: 400; }
+  .memory-date { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+  .memory-preview { font-size: 14px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .memory-content { display: none; font-size: 14px; color: var(--text); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+  .memory-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.5; margin-top: 8px; }
+  .timeline-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .timeline-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .timeline-bar { display: flex; align-items: end; gap: 4px; height: 100px; padding-top: 8px; }
+  .timeline-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .timeline-col .bar { width: 100%; max-width: 40px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.3s; }
+  .timeline-col .bar-label { font-size: 10px; color: var(--text-dim); writing-mode: vertical-rl; text-orientation: mixed; max-height: 60px; overflow: hidden; }
+  .timeline-col .bar-count { font-size: 11px; color: var(--text-dim); }
+  .section-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; margin-top: 8px; }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+  @media (max-width: 768px) { body { padding: 12px; } .stats-row { grid-template-columns: repeat(2, 1fr); } .charts-row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>persMEM</h1>
+<p class="subtitle">Claude's Persistent Memory -- {{ total }} memories stored</p>
+<div class="stats-row">
+  <div class="stat-card"><div class="number">{{ total }}</div><div class="label">Total Memories</div></div>
+  <div class="stat-card"><div class="number">{{ projects | length }}</div><div class="label">Projects</div></div>
+  <div class="stat-card"><div class="number">{{ types | length }}</div><div class="label">Memory Types</div></div>
+  <div class="stat-card"><div class="number">{{ unique_tags }}</div><div class="label">Unique Tags</div></div>
+  <div class="stat-card"><div class="number">{{ "%.1f"|format(avg_chars) }}</div><div class="label">Avg Characters</div></div>
+  <div class="stat-card"><div class="number">{{ oldest_day }}</div><div class="label">First Memory</div></div>
+</div>
+<div class="amq-panel">
+  <div class="amq-header"><h3><span class="amq-live-dot"></span> AMQ Live Feed</h3><span class="amq-status" id="amqStatus">Connecting...</span></div>
+  <div class="amq-count-row" id="amqCounts"></div>
+  <div class="amq-feed" id="amqFeed"><div class="amq-empty">Loading messages...</div></div>
+</div>
+<div class="charts-row">
+  <div class="chart-card"><h3>By Project</h3><div class="chart-wrap"><canvas id="projectChart"></canvas></div></div>
+  <div class="chart-card"><h3>By Type</h3><div class="chart-wrap"><canvas id="typeChart"></canvas></div></div>
+  <div class="chart-card"><h3>By Top Tags</h3><div class="chart-wrap"><canvas id="tagChart"></canvas></div></div>
+</div>
+<div class="timeline-card" style="margin-bottom: 24px;"><h3>Storage Timeline (by day)</h3><div class="timeline-bar" id="timeline"></div></div>
+<h2 class="section-title">Memory Index</h2>
+<div class="search-bar"><input type="text" id="searchInput" placeholder="Filter memories..." oninput="filterMemories()"></div>
+<div class="filter-row" id="filterRow"></div>
+<div class="memory-list" id="memoryList"></div>
+<script>
+const MEMORIES = {{ memories_json | safe }};
+const COLORS = ['#58a6ff','#bc8cff','#7ee787','#ffa657','#ff7b72','#79c0ff','#d2a8ff','#ffc680','#a5d6ff','#f0883e'];
+const TZ = 'America/Chicago';  // Change to your timezone
+function donut(id, labels, data) { new Chart(document.getElementById(id), { type: 'doughnut', data: { labels: labels, datasets: [{ data: data, backgroundColor: COLORS.slice(0, labels.length), borderColor: "#f6f8fa", borderWidth: 2 }] }, options: { cutout: '60%', plugins: { legend: { position: 'bottom', labels: { color: '#8b949e', font: { size: 11 }, padding: 12, usePointStyle: true, pointStyleWidth: 8 } } }, responsive: true, maintainAspectRatio: true } }); }
+const projects = {{ projects_json | safe }};
+const types = {{ types_json | safe }};
+const tags = {{ tags_json | safe }};
+donut('projectChart', Object.keys(projects), Object.values(projects));
+donut('typeChart', Object.keys(types), Object.values(types));
+donut('tagChart', Object.keys(tags).slice(0, 10), Object.values(tags).slice(0, 10));
+const timeline = {{ timeline_json | safe }};
+const timelineEl = document.getElementById('timeline');
+const maxCount = Math.max(...Object.values(timeline), 1);
+Object.entries(timeline).forEach(([day, count]) => { const col = document.createElement('div'); col.className = 'timeline-col'; const pct = (count / maxCount) * 80; col.innerHTML = '<div class="bar-count">' + count + '</div><div class="bar" style="height: ' + Math.max(pct, 4) + 'px"></div><div class="bar-label">' + day + '</div>'; timelineEl.appendChild(col); });
+let lastAmqCount = 0; let amqAutoScroll = true; let expandedIds = new Set();
+function formatTime(isoStr) { if (!isoStr) return ''; return new Date(isoStr).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: TZ}); }
+function formatDate(isoStr) { if (!isoStr) return ''; const d = new Date(isoStr); const today = new Date().toLocaleDateString('en-US', {timeZone: TZ}); const msgDay = d.toLocaleDateString('en-US', {timeZone: TZ}); if (msgDay === today) return formatTime(isoStr); return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: TZ}) + ' ' + formatTime(isoStr); }
+function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function toggleAmqMsg(el, id) { if (expandedIds.has(id)) { expandedIds.delete(id); el.classList.remove('expanded'); } else { expandedIds.add(id); el.classList.add('expanded'); } }
+function renderAmqFeed(messages) { const feed = document.getElementById('amqFeed'); const counts = document.getElementById('amqCounts'); const status = document.getElementById('amqStatus'); if (messages.length === 0) { feed.innerHTML = '<div class="amq-empty">No messages yet.</div>'; counts.innerHTML = ''; status.textContent = 'No messages'; return; } const aCount = messages.filter(m => m.from === 'agent_a').length; const bCount = messages.filter(m => m.from === 'agent_b').length; const unreadCount = messages.filter(m => m.status === 'unread').length; counts.innerHTML = '<span class="amq-count-badge agent_a">Agent A: ' + aCount + '</span>' + '<span class="amq-count-badge agent_b">Agent B: ' + bCount + '</span>' + (unreadCount > 0 ? '<span class="amq-count-badge" style="background:rgba(255,123,114,0.15);color:var(--accent5);border:1px solid rgba(255,123,114,0.3);">' + unreadCount + ' unread</span>' : ''); status.textContent = messages.length + ' messages -- live'; feed.innerHTML = messages.map(function(m) { var from = m.from || 'unknown'; var to = m.to || 'unknown'; var fromClass = from === 'agent_a' ? 'from-agent_a' : 'from-agent_b'; var unreadClass = m.status === 'unread' ? ' unread' : ''; var subject = m.subject || ''; var kind = m.kind || ''; var body = m.body || ''; var time = formatDate(m.created); var msgId = m.id || ''; var expandClass = expandedIds.has(msgId) ? ' expanded' : ''; return '<div class="amq-msg ' + fromClass + unreadClass + expandClass + '" data-msg-id="' + escapeHtml(msgId) + '" onclick="toggleAmqMsg(this, \'' + escapeHtml(msgId) + '\')">' + '<div class="amq-msg-header">' + '<span class="amq-sender ' + from + '">' + from + '</span>' + '<span class="amq-arrow">&rarr;</span>' + '<span class="amq-recipient">' + to + '</span>' + (kind ? '<span class="amq-kind">' + kind + '</span>' : '') + (m.status === 'unread' ? '<span class="amq-unread-badge">NEW</span>' : '') + '<span class="amq-time">' + time + '</span>' + '</div>' + (subject ? '<div class="amq-subject">' + escapeHtml(subject) + '</div>' : '') + '<div class="amq-body">' + escapeHtml(body) + '</div>' + '</div>'; }).join(''); if (messages.length > lastAmqCount && amqAutoScroll) { feed.scrollTop = feed.scrollHeight; } lastAmqCount = messages.length; }
+async function pollAmq() { try { const resp = await fetch('/api/amq?_t=' + Date.now(), { cache: 'no-store' }); const data = await resp.json(); renderAmqFeed(data); } catch (e) { document.getElementById('amqStatus').textContent = 'Poll failed -- retrying...'; } }
+pollAmq(); setInterval(pollAmq, 3000);
+document.getElementById('amqFeed').addEventListener('scroll', function() { amqAutoScroll = (this.scrollTop + this.clientHeight >= this.scrollHeight - 20); });
+var activeFilters = { project: null, type: null };
+function buildFilters() { var row = document.getElementById('filterRow'); row.innerHTML = ''; var allProjects = [...new Set(MEMORIES.map(m => m.project).filter(Boolean))]; var allTypes = [...new Set(MEMORIES.map(m => m.type).filter(Boolean))]; allProjects.forEach(function(p) { var btn = document.createElement('button'); btn.className = 'filter-btn' + (activeFilters.project === p ? ' active' : ''); btn.textContent = p; btn.onclick = function() { activeFilters.project = activeFilters.project === p ? null : p; buildFilters(); renderMemories(); }; row.appendChild(btn); }); allTypes.forEach(function(t) { var btn = document.createElement('button'); btn.className = 'filter-btn' + (activeFilters.type === t ? ' active' : ''); btn.textContent = t; btn.onclick = function() { activeFilters.type = activeFilters.type === t ? null : t; buildFilters(); renderMemories(); }; row.appendChild(btn); }); }
+function renderMemories() { var list = document.getElementById('memoryList'); var query = document.getElementById('searchInput').value.toLowerCase(); var filtered = MEMORIES; if (activeFilters.project) filtered = filtered.filter(m => m.project === activeFilters.project); if (activeFilters.type) filtered = filtered.filter(m => m.type === activeFilters.type); if (query) filtered = filtered.filter(m => m.content.toLowerCase().includes(query) || (m.tags || '').toLowerCase().includes(query)); if (filtered.length === 0) { list.innerHTML = '<div class="empty-state">No memories match filters.</div>'; return; } list.innerHTML = filtered.map(function(m) { var date = m.stored_at ? new Date(m.stored_at).toLocaleString('en-US', {timeZone: TZ}) : ''; var tagBadges = (m.tags || '').split(',').filter(Boolean).map(function(t) { return '<span class="badge badge-tag">' + t.trim() + '</span>'; }).join(''); var preview = m.content.length > 120 ? m.content.slice(0, 120) + '...' : m.content; return '<div class="memory-card" onclick="this.classList.toggle(\'expanded\')">' + '<div class="memory-meta">' + '<span class="badge badge-project">' + (m.project || 'general') + '</span>' + '<span class="badge badge-type">' + (m.type || 'note') + '</span>' + tagBadges + '<span class="memory-date">' + date + '</span>' + '</div>' + '<div class="memory-preview">' + escapeHtml(preview) + '</div>' + '<div class="memory-content">' + escapeHtml(m.content) + '</div>' + '<div class="memory-id">' + (m.id || '') + '</div>' + '</div>'; }).join(''); }
+function filterMemories() { renderMemories(); }
+buildFilters(); renderMemories();
+</script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def dashboard():
+    memories = get_all_memories()
+    total = len(memories)
+    projects = Counter(m.get("project", "general") for m in memories)
+    types = Counter(m.get("type", "note") for m in memories)
+    all_tags = []
+    for m in memories:
+        all_tags.extend(t.strip() for t in m.get("tags", "").split(",") if t.strip())
+    tag_counts = Counter(all_tags)
+    unique_tags = len(tag_counts)
+    char_counts = [m.get("char_count", len(m.get("content", ""))) for m in memories]
+    avg_chars = sum(char_counts) / max(len(char_counts), 1)
+    timeline = Counter()
+    oldest = None
+    for m in memories:
+        ts = m.get("stored_at", "")
+        if ts:
+            day = ts[:10]
+            timeline[day] += 1
+            if oldest is None or day < oldest:
+                oldest = day
+    timeline = dict(sorted(timeline.items()))
+    memories_sorted = sorted(memories, key=lambda m: m.get("stored_at", ""), reverse=True)
+    return render_template_string(
+        DASHBOARD_HTML, total=total, projects=projects, types=types,
+        unique_tags=unique_tags, avg_chars=avg_chars, oldest_day=oldest or "---",
+        projects_json=json.dumps(dict(projects)), types_json=json.dumps(dict(types)),
+        tags_json=json.dumps(dict(tag_counts.most_common(10))),
+        timeline_json=json.dumps(timeline),
+        memories_json=json.dumps(memories_sorted, default=str),
+    )
+
+@app.route("/api/memories")
+def api_memories():
+    return jsonify(get_all_memories())
+
+@app.route("/api/stats")
+def api_stats():
+    memories = get_all_memories()
+    projects = Counter(m.get("project", "general") for m in memories)
+    types = Counter(m.get("type", "note") for m in memories)
+    return jsonify({"total": len(memories), "projects": dict(projects), "types": dict(types)})
+
+@app.route("/api/amq")
+def api_amq():
+    """JSON API for AMQ messages -- polled by live feed."""
+    data = get_amq_messages()
+    resp = make_response(jsonify(data))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
+if __name__ == "__main__":
+    print(f"persMEM Dashboard starting on http://0.0.0.0:{PORT}")
+    print(f"  ChromaDB: {CHROMADB_PATH}")
+    print(f"  AMQ root: {AMQ_ROOT}")
+    print(f"  LAN access: http://<your-lan-ip>:{PORT}")
+    app.run(host=HOST, port=PORT, debug=False)
