@@ -341,7 +341,7 @@ import json as _json
 ALLOWED_COMMANDS = {
     "git", "diff", "ls", "cat", "head", "tail", "find", "grep",
     "wc", "mkdir", "cp", "mv", "rm", "tar", "unzip", "pwd",
-    "echo", "sort", "uniq", "sed", "awk", "tree",
+    "echo", "sort", "uniq", "sed", "awk", "tree", "date",
 }
 
 def _validate_command(command: str) -> str | None:
