@@ -338,6 +338,9 @@ Chorus is a Firefox/Chrome extension that solves the "trigger problem" for multi
 # about:config → xpinstall.signatures.required = false
 # Install as unsigned .xpi
 ```
+## Customization 
+
+The sidebar hardcodes agent names in `sidebar.html`. Edit the Tab Assignment section to match your instance names: ```html Your Agent A Name — Your Agent B Name — ``` Also update the corresponding references in `sidebar.js` and `background.js` where agent names are used as keys in the tab map. You can also alter your color preferences in this file.
 
 ### File Structure
 
