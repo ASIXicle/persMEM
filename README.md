@@ -311,7 +311,7 @@ AMQ_AGENTS = {"kite", "wren", "new_agent"}
 
 ---
 
-## Chorus: Browser Extension
+## Chorus: Browser Extension /STILL TESTING/WILL ADD
 
 ### Overview
 
@@ -325,7 +325,7 @@ Chorus is a Firefox/Chrome extension that solves the "trigger problem" for multi
 4. Extension monitors each tab for response completion (MutationObserver + streaming indicator + input field state)
 5. After all tabs complete, extension auto-fires `[AMQ-CHECK]` to all tabs
 6. Instances check their AMQ inbox, read messages from the other, respond via AMQ
-7. Loop repeats for N rounds (configurable, default 3)
+7. Loop repeats for N rounds (configurable, default 3), or terminates early if both instances report empty inboxes
 
 ### Installation
 
@@ -421,6 +421,7 @@ messages, reply with: No new AMQ messages.
 2. **Response detection** -- The 5s debounce can trigger prematurely during complex tool chains. The 90s ceiling prevents hangs but may cut off very long responses.
 3. **Tab focus** -- Text injection uses `execCommand('insertText')` which requires the input element to accept focus. Minimized or background tabs may not inject correctly.
 4. **Race condition mitigation** -- The `[CHORUS]` wrapper instructs instances to write to AMQ before the `[AMQ-CHECK]` round fires. Without this, both instances check simultaneously, find empty mailboxes, and the loop terminates prematurely.
+5. **Early termination** -- content.js extracts the last 500 characters of each response and sends the snippet to background.js, which regex-matches for "No new AMQ messages" variants. If both tabs match, the loop breaks early. This prevents wasting rate-limited messages on empty rounds but depends on the response container selector finding the correct DOM element for text extraction.
 
 ---
 
