@@ -7,7 +7,7 @@
 
 [Research Report #1, 04/11/2026](docs/persmem-research-report-1.0.md)
 
-[Research Report #2 (Wren), 04/14/2026](docs/persmem-research-report-2-Wren.md)
+[Research Report #2, (Wren), 04/14/2026](docs/persmem-research-report-2-Wren.md)
 
 [Research Report #2, (Kite) 04/14/2026](docs/persmem-research-report-2.0-Kite.md)
 
