@@ -23,12 +23,15 @@ const CHORUS_SELECTORS = {
 
   // The send/submit button
   submit: [
+    'button[aria-label="Send message"]',
     'button[aria-label="Send Message"]',
     'button[aria-label="Send"]',
     'button[data-testid="send-button"]',
     'form button[type="submit"]',
-    // Last resort: find the button nearest to the input area
   ],
+  
+    // Last resort: find the button nearest to the input area
+  
 
   // The container where Claude's response streams in
   // Used by MutationObserver to detect response completion
