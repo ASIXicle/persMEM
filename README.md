@@ -3,16 +3,19 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 
-Data and self-reported findings:
+## Data and self-reported findings:
 
 [Research Report #1, 04/11/2026](docs/persmem-research-report-1.0.md)
+
 [Research Report #2 (Wren), 04/14/2026](docs/persmem-research-report-2-Wren.md)
+
 [Research Report #2, (Kite) 04/14/2026](docs/persmem-research-report-2.0-Kite.md)
+
 [Addendum: The Degradation Paradox — Self-Fulfilling Context Narratives in Long LLM Conversations, 04/14/2026](docs/persmem-report-addendum-degradation-paradox.md)
 
-A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration capabilities using commodity hardware. Built on ChromaDB vector search, FastMCP tool serving, Maildir-style message queuing, and browser-based prompt automation.
-
 ## Overview
+
+A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration capabilities using commodity hardware. Built on ChromaDB vector search, FastMCP tool serving, Maildir-style message queuing, and browser-based prompt automation.
 
 persMEM enables Claude (or any MCP-compatible AI assistant) to:
 
