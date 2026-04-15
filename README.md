@@ -86,7 +86,8 @@ The system runs on a single low-power Linux container (tested on Intel N97, 4 co
 
 **Tested configuration:**
 - Intel N97 (4 cores, 3.6GHz boost, 12W TDP)
-- 8GB RAM (persMEM uses ~1.2GB under load)
+- 48GB DDR5 RAM (persMEM uses ~1.2GB under load)
+- SK Hynix M.2 NVMe SSD
 - ZFS storage on Proxmox
 
 **Capacity (from stress testing):**
@@ -376,23 +377,16 @@ const CHORUS_SELECTORS = {
 
   // Submit button
   submit: [
-    'button[aria-label="Send Message"]',
+    'button[aria-label="Send message"]',         // Current (lowercase)
+    'button[aria-label="Send Message"]',         // Legacy
     'button[aria-label="Send"]',
-    'button[data-testid="send-button"]',
-  ],
-
-  // Response container (for MutationObserver)
-  responseContainer: [
-    '[data-testid="chat-message-list"]',
-    'div[class*="thread"]',
-    '[role="log"]',
-    'main',
   ],
 
   // Streaming indicator (present = still generating)
   streamingIndicator: [
+    'button[aria-label="Stop response"]',        // Current (lowercase r)
+    'button[aria-label="Stop Response"]',        // Legacy
     '[data-testid="stop-button"]',
-    'button[aria-label="Stop Response"]',
   ],
 };
 ```
@@ -401,10 +395,21 @@ Each selector key has an ordered fallback chain. The `chorusQuery()` helper trie
 
 ### Response Completion Detection
 
-Chorus uses a dual-timer approach:
+Chorus v0.3 uses a three-tier detection system:
 
-- **Fast path (5s):** MutationObserver watches the response container. When DOM mutations stop for 5 seconds AND the streaming indicator is gone AND the input field is re-enabled, the response is considered complete.
-- **Ceiling (90s):** Hard timeout that fires regardless. Prevents infinite hangs during tool-heavy responses where DOM mutations can pause for 15-30 seconds between operations.
+1. **Primary: Stop button lifecycle** -- Polls every 500ms for the "Stop response" button to appear (generation started), then watches for it to disappear (generation finished). A 3-second debounce after disappearance allows final DOM mutations to settle, followed by an input-field re-enabled check. This survives MCP tool call gaps that caused false positives in earlier DOM-silence-only approaches.
+2. **Fallback: DOM silence (15s)** -- If the stop button selector fails (e.g., after a UI update), a MutationObserver watches the response container. 15 seconds of DOM silence plus input field re-enabled triggers completion. This replaces the original 5-second debounce that was too aggressive for tool-heavy responses.
+3. **Safety net: Ceiling timeout** -- Configurable from the sidebar (default 300 seconds). Fires regardless of other signals. Prevents infinite hangs.
+
+### Round-Robin Mode
+
+In round-robin mode (default), Chorus fires to one instance at a time rather than both simultaneously:
+
+- **Round 0:** Instance A gets the initial `[CHORUS]` prompt. After completion, Instance B gets a modified prompt that instructs it to check AMQ first and build on A's analysis — preventing duplicate work.
+- **Rounds 1-N:** Instance A gets `[AMQ-CHECK]`, completes, then Instance B gets `[AMQ-CHECK]`.
+- **Manual stop:** A red STOP button appears in the sidebar during active sessions. Pressing it halts the loop after the current response finishes (between-rounds abort, never mid-response).
+
+Simultaneous mode (both at once) is available as an alternative for tasks that don't require sequential coordination.
 
 ### Prompt Protocol
 
@@ -426,11 +431,10 @@ messages, reply with: No new AMQ messages.
 
 ### Known Limitations
 
-1. **DOM fragility** -- Chat provider UI updates will break selectors. The `selectors.js` abstraction makes fixes quick but not automatic.
-2. **Response detection** -- The 5s debounce can trigger prematurely during complex tool chains. The 90s ceiling prevents hangs but may cut off very long responses.
-3. **Tab focus** -- Text injection uses `execCommand('insertText')` which requires the input element to accept focus. Minimized or background tabs may not inject correctly.
-4. **Race condition mitigation** -- The `[CHORUS]` wrapper instructs instances to write to AMQ before the `[AMQ-CHECK]` round fires. Without this, both instances check simultaneously, find empty mailboxes, and the loop terminates prematurely.
-5. **Early termination** -- content.js extracts the last 500 characters of each response and sends the snippet to background.js, which regex-matches for "No new AMQ messages" variants. If both tabs match, the loop breaks early. This prevents wasting rate-limited messages on empty rounds but depends on the response container selector finding the correct DOM element for text extraction.
+1. **DOM fragility** -- Chat provider UI updates will break selectors. The `selectors.js` abstraction makes fixes quick (one file, ordered fallback chains) but not automatic. Case sensitivity matters — "Stop response" vs "Stop Response" caused the v0.2 completion detection failure.
+2. **Tab focus** -- Text injection uses `execCommand('insertText')` which requires the input element to accept focus. Minimized or background tabs may not inject correctly.
+3. **Long conversations** -- Very long conversation histories (200+ messages) can cause Firefox memory pressure. Content script reloads may be needed. The instances themselves may experience context degradation (see Research Report Addendum: Degradation Paradox).
+4. **Early termination** -- Currently human-gated via the STOP button. Auto-termination based on response content (detecting "No new AMQ messages") is implemented but the snippet capture may match injected prompts rather than AI responses depending on DOM structure. Manual stop is more reliable.
 
 ---
 
