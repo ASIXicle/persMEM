@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Chorus",
-  "version": "0.1.0",
-  "description": "Dual-instance Claude prompt relay with AMQ exchange loop",
+  "version": "0.3.0",
+  "description": "Dual-instance Claude prompt relay — stop-button completion detection",
   "permissions": [
     "tabs",
     "storage",

@@ -1,5 +1,6 @@
 /**
- * sidebar.js — Chorus Sidebar Logic
+ * sidebar.js — Chorus Sidebar Logic v0.2
+ * Adds mode toggle (round-robin vs simultaneous) and ceiling config.
  */
 
 (() => {
@@ -11,7 +12,10 @@
   const btnAssign  = document.getElementById("btn-assign");
   const inputMsg   = document.getElementById("input-msg");
   const inputRounds = document.getElementById("input-rounds");
+  const inputCeiling = document.getElementById("input-ceiling");
+  const selMode    = document.getElementById("sel-mode");
   const btnFire    = document.getElementById("btn-fire");
+  const btnStop    = document.getElementById("btn-stop");
   const statusEl   = document.getElementById("status");
   const roundEl    = document.getElementById("round-display");
 
@@ -23,23 +27,19 @@
       type: "chorus:list-claude-tabs",
     });
 
-    // Populate both selects
     for (const sel of [selKite, selWren]) {
       const currentVal = sel.value;
       sel.innerHTML = '<option value="">—</option>';
       for (const tab of tabs) {
         const opt = document.createElement("option");
         opt.value = tab.id;
-        // Show conversation title, truncated
         const title = (tab.title || "Claude").substring(0, 50);
         opt.textContent = `[${tab.id}] ${title}`;
         sel.appendChild(opt);
       }
-      // Restore previous selection if still valid
       if (currentVal) sel.value = currentVal;
     }
 
-    // Try to restore from saved assignments
     const saved = await browser.runtime.sendMessage({
       type: "chorus:get-tabs",
     });
@@ -84,17 +84,23 @@
     }
 
     const rounds = parseInt(inputRounds.value, 10) || 3;
+    const ceilingSec = parseInt(inputCeiling.value, 10) || 300;
+    const ceilingMs = ceilingSec * 1000;
+    const mode = selMode.value || "roundrobin";
 
     firing = true;
     btnFire.disabled = true;
     btnFire.textContent = "Running...";
-    setStatus("firing", "Sending to both tabs...");
+    btnStop.style.display = "block";
+    setStatus("firing", `Sending (${mode}, ${ceilingSec}s ceiling)...`);
 
     try {
       const result = await browser.runtime.sendMessage({
         type: "chorus:fire",
         text: text,
         rounds: rounds,
+        mode: mode,
+        ceilingMs: ceilingMs,
       });
 
       if (result.success) {
@@ -108,6 +114,7 @@
       firing = false;
       btnFire.disabled = false;
       btnFire.textContent = "▶ Fire Both";
+      btnStop.style.display = "none";
     }
   }
 
@@ -115,18 +122,28 @@
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.type === "chorus:status") {
       const { state, round, maxRounds } = msg;
+
       if (state === "firing") {
-        const label = round === 0 ? "Initial prompt" : `AMQ Round ${round}`;
-        setStatus("firing", `${label} — waiting for responses...`);
+        const label = round === 0 ? "Initial prompt" : `Exchange ${round}`;
+        setStatus("firing", `${label} — waiting...`);
+        roundEl.textContent = `${round} / ${maxRounds}`;
+      } else if (state === "firing-kite") {
+        setStatus("firing", `Exchange ${round} — Kite responding...`);
+        roundEl.textContent = `${round} / ${maxRounds}`;
+      } else if (state === "firing-wren") {
+        setStatus("firing", `Exchange ${round} — Wren responding...`);
         roundEl.textContent = `${round} / ${maxRounds}`;
       } else if (state === "complete") {
-        const label = round === 0 ? "Initial" : `Round ${round}`;
+        const label = round === 0 ? "Initial" : `Exchange ${round}`;
         setStatus("complete", `${label} complete`);
       } else if (state === "done") {
-        setStatus("complete", "All rounds complete ✓");
+        setStatus("complete", "All exchanges complete ✓");
         roundEl.textContent = "";
       } else if (state === "done-early") {
-        setStatus("complete", "Both empty — stopped at round " + round + " ✓");
+        setStatus("complete", "Both empty — stopped at exchange " + round + " ✓");
+        roundEl.textContent = "";
+      } else if (state === "stopped") {
+        setStatus("complete", "Stopped by user at exchange " + round + " ✓");
         roundEl.textContent = "";
       }
     }
@@ -142,8 +159,12 @@
   btnRefresh.addEventListener("click", refreshTabs);
   btnAssign.addEventListener("click", assignTabs);
   btnFire.addEventListener("click", fire);
+  btnStop.addEventListener("click", function() {
+    browser.runtime.sendMessage({ type: "chorus:stop" });
+    setStatus("complete", "Stopped by user ✓");
+    btnStop.style.display = "none";
+  });
 
-  // Ctrl+Enter to fire
   inputMsg.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !firing) {
       e.preventDefault();
@@ -151,6 +172,5 @@
     }
   });
 
-  // Initial load
   refreshTabs();
 })();

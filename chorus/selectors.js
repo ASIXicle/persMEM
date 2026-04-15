@@ -7,7 +7,7 @@
  * ║  Each selector has multiple fallbacks — try them in order.  ║
  * ╚══════════════════════════════════════════════════════════════╝
  * 
- * Last verified: April 2026
+ * Last verified: April 15, 2026 (Stop response = lowercase r)
  */
 
 const CHORUS_SELECTORS = {
@@ -29,12 +29,8 @@ const CHORUS_SELECTORS = {
     'button[data-testid="send-button"]',
     'form button[type="submit"]',
   ],
-  
-    // Last resort: find the button nearest to the input area
-  
 
   // The container where Claude's response streams in
-  // Used by MutationObserver to detect response completion
   responseContainer: [
     '[data-testid="chat-message-list"]',
     'div[class*="thread"]',
@@ -56,14 +52,15 @@ const CHORUS_SELECTORS = {
 
   // Streaming indicator (appears while Claude is typing)
   streamingIndicator: [
-    '[data-testid="stop-button"]',
-    'button[aria-label="Stop Response"]',
-    'button[aria-label="Stop"]',
+    'button[aria-label="Stop response"]',   // CURRENT — lowercase r (verified Apr 2026)
+    'button[aria-label="Stop Response"]',   // legacy fallback
+    '[data-testid="stop-button"]',          // testid fallback
+    'button[aria-label="Stop"]',            // broad fallback
     'div[class*="streaming"]',
     'div[class*="loading"]',
   ],
 
-  // Conversation title (for auto-detecting which tab is Kite/Wren)
+  // Conversation title
   conversationTitle: [
     'h1',
     '[data-testid="conversation-title"]',
@@ -71,10 +68,6 @@ const CHORUS_SELECTORS = {
   ],
 };
 
-/**
- * Find the first matching element from a list of selector fallbacks.
- * Returns null if none match.
- */
 function chorusQuery(selectorKey) {
   const selectors = CHORUS_SELECTORS[selectorKey];
   if (!selectors) return null;
@@ -85,10 +78,6 @@ function chorusQuery(selectorKey) {
   return null;
 }
 
-/**
- * Find all matching elements from a list of selector fallbacks.
- * Returns results from the first selector that matches anything.
- */
 function chorusQueryAll(selectorKey) {
   const selectors = CHORUS_SELECTORS[selectorKey];
   if (!selectors) return [];

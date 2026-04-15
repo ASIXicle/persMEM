@@ -1,17 +1,12 @@
 /**
- * content.js — Chorus Content Script
- * Injected into claude.ai tabs. Handles:
- *   - Text injection into ProseMirror input
- *   - Submit button click
- *   - Response completion detection
- *   - Response text extraction (for loop termination)
- *   - Communication with background script
+ * content.js — Chorus Content Script v0.3
+ * Stop-button lifecycle as primary completion detection.
+ * DOM silence (15s) as fallback. Ceiling as safety net.
  */
 
 (() => {
   "use strict";
 
-  // Prevent double-injection
   if (window.__chorus_loaded) return;
   window.__chorus_loaded = true;
 
@@ -19,8 +14,8 @@
   let responseObserver = null;
   let completionTimer = null;
   let ceilingTimer = null;
-  const DEBOUNCE_FAST_MS = 5000;    // 5s silence = probably done
-  const DEBOUNCE_CEILING_MS = 90000; // 90s max — hard safety limit
+  let currentCeilingMs = 300000;     // default 300s, overridden per-inject
+  let lastInjectedText = "";         // track what we injected to filter from snippets
 
   // ── Text Injection ──
   function injectText(text) {
@@ -32,7 +27,6 @@
 
     input.focus();
 
-    // Select only the input's content (not the whole page).
     const range = document.createRange();
     range.selectNodeContents(input);
     const sel = window.getSelection();
@@ -40,10 +34,8 @@
     sel.addRange(range);
     document.execCommand("delete", false, null);
 
-    // Insert new text
     document.execCommand("insertText", false, text);
 
-    // Belt-and-suspenders: dispatch InputEvent
     input.dispatchEvent(new InputEvent("input", {
       bubbles: true,
       cancelable: true,
@@ -62,7 +54,6 @@
       return true;
     }
 
-    // Fallback: try Enter key on the input
     const input = chorusQuery("input");
     if (input) {
       input.dispatchEvent(new KeyboardEvent("keydown", {
@@ -78,70 +69,103 @@
     return false;
   }
 
-  // ── Response Completion Detection ──
-  // Dual-timer approach:
-  //   FAST PATH: 5s of DOM mutation silence = response probably done
-  //   CEILING:   90s max timeout = declare complete no matter what
+  // ── Response Completion Detection (v0.3 — stop button primary) ──
+  const STOP_BTN_APPEAR_TIMEOUT = 15000;  // 15s to detect generation start
+  const POST_STOP_DEBOUNCE = 3000;        // 3s settle after stop btn disappears
+  const DOM_SILENCE_FALLBACK = 15000;     // 15s DOM silence = fallback
+  let stopBtnPollTimer = null;
+
   function watchForCompletion(callback) {
     stopWatching();
 
-    const container = chorusQuery("responseContainer");
-    if (!container) {
-      console.warn("[Chorus] No response container found, using body");
-    } else {
-      console.log("[Chorus] Response container:", container.tagName, container.className.substring(0, 60));
-    }
-
-    const target = container || document.body;
+    const container = chorusQuery("responseContainer") || document.body;
 
     function declareComplete(source) {
-      const streaming = chorusQuery("streamingIndicator");
-      if (streaming) {
-        if (source === "fast") {
-          resetFastTimer();
-          return;
-        }
-        console.warn("[Chorus] Ceiling override — streaming indicator still present");
-      }
-
-      const input = chorusQuery("input");
-      const inputReady = input && (input.getAttribute("contenteditable") === "true");
-
-      if (!inputReady && source === "fast") {
-        resetFastTimer();
-        return;
-      }
-
-      console.log(`[Chorus] Response complete (${source} path)`);
+      console.log(`[Chorus] Response complete (${source}, ceiling=${currentCeilingMs}ms)`);
       stopWatching();
       callback();
     }
 
-    function resetFastTimer() {
-      clearTimeout(completionTimer);
-      completionTimer = setTimeout(function() { declareComplete("fast"); }, DEBOUNCE_FAST_MS);
-    }
+    // ── PRIMARY: Stop button lifecycle ──
+    // Phase 1: Wait for stop button to APPEAR (generation started)
+    let stopBtnSeen = false;
+    let phase1Start = Date.now();
 
-    // Hard ceiling — declare complete after 90s no matter what
+    stopBtnPollTimer = setInterval(function() {
+      const stopBtn = chorusQuery("streamingIndicator");
+
+      if (!stopBtnSeen) {
+        // Phase 1: looking for stop button to appear
+        if (stopBtn) {
+          stopBtnSeen = true;
+          console.log("[Chorus] Stop button appeared — generation started");
+        } else if (Date.now() - phase1Start > STOP_BTN_APPEAR_TIMEOUT) {
+          // Stop button never appeared — fall back to DOM silence
+          console.warn("[Chorus] Stop button never appeared, falling back to DOM silence");
+          clearInterval(stopBtnPollTimer);
+          stopBtnPollTimer = null;
+          startDomSilenceFallback(container, declareComplete);
+          return;
+        }
+      } else {
+        // Phase 2: stop button was seen, waiting for it to DISAPPEAR
+        if (!stopBtn) {
+          console.log("[Chorus] Stop button disappeared — generation finished, debouncing...");
+          clearInterval(stopBtnPollTimer);
+          stopBtnPollTimer = null;
+
+          // Short debounce for final DOM mutations to settle
+          completionTimer = setTimeout(function() {
+            const input = chorusQuery("input");
+            const inputReady = input && (input.getAttribute("contenteditable") === "true");
+            if (inputReady) {
+              declareComplete("stop-button");
+            } else {
+              // Input not ready yet — wait a bit more
+              console.log("[Chorus] Input not ready after stop btn gone, extending...");
+              completionTimer = setTimeout(function() {
+                declareComplete("stop-button-extended");
+              }, POST_STOP_DEBOUNCE);
+            }
+          }, POST_STOP_DEBOUNCE);
+          return;
+        }
+      }
+    }, 500);  // poll every 500ms
+
+    // ── SAFETY NET: Ceiling timeout ──
     ceilingTimer = setTimeout(function() {
-      console.log("[Chorus] Ceiling timeout reached");
+      console.log(`[Chorus] Ceiling timeout reached (${currentCeilingMs}ms)`);
       declareComplete("ceiling");
-    }, DEBOUNCE_CEILING_MS);
+    }, currentCeilingMs);
+  }
+
+  // ── FALLBACK: DOM silence (only if stop button detection fails) ──
+  function startDomSilenceFallback(target, declareComplete) {
+    function resetFallbackTimer() {
+      clearTimeout(completionTimer);
+      completionTimer = setTimeout(function() {
+        const input = chorusQuery("input");
+        const inputReady = input && (input.getAttribute("contenteditable") === "true");
+        if (inputReady) {
+          declareComplete("dom-silence-fallback");
+        } else {
+          resetFallbackTimer();
+        }
+      }, DOM_SILENCE_FALLBACK);
+    }
 
     responseObserver = new MutationObserver(function(mutations) {
       if (mutations.length > 0) {
-        resetFastTimer();
+        resetFallbackTimer();
       }
     });
 
     responseObserver.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: true,
+      childList: true, subtree: true, characterData: true,
     });
 
-    // Start the initial fast timer
-    resetFastTimer();
+    resetFallbackTimer();
   }
 
   function stopWatching() {
@@ -149,33 +173,52 @@
       responseObserver.disconnect();
       responseObserver = null;
     }
+    if (stopBtnPollTimer) {
+      clearInterval(stopBtnPollTimer);
+      stopBtnPollTimer = null;
+    }
     clearTimeout(completionTimer);
     clearTimeout(ceilingTimer);
   }
 
-  // ── Count response messages ──
   function countResponses() {
     return chorusQueryAll("responseMessage").length;
   }
 
-  // ── Extract last response text (for empty-inbox detection) ──
   function getLastResponseSnippet() {
     var msgs = chorusQueryAll("responseMessage");
     if (msgs.length === 0) return "";
+
+    // Walk backward to find the last message that ISN'T our injected prompt
+    var injectedPrefix = lastInjectedText.substring(0, 40);
+    for (var i = msgs.length - 1; i >= 0; i--) {
+      var text = (msgs[i].textContent || msgs[i].innerText || "").trim();
+      if (text.length === 0) continue;
+      // Skip if this message starts with our injected text
+      if (injectedPrefix && text.indexOf(injectedPrefix) === 0) continue;
+      // Skip very short fragments (UI artifacts)
+      if (text.length < 20) continue;
+      return text.slice(-500);
+    }
+    // Fallback: return whatever the last message has
     var last = msgs[msgs.length - 1];
-    var text = (last.textContent || last.innerText || "").trim();
-    // Return last 500 chars — enough for background.js to detect
-    // "No new AMQ messages" without transferring entire response
-    return text.slice(-500);
+    return (last.textContent || last.innerText || "").trim().slice(-500);
   }
 
   // ── Message Handler ──
   browser.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
     if (msg.type === "chorus:inject") {
       var text = msg.text;
-      var beforeCount = countResponses();
 
-      console.log('[Chorus] Injecting: "' + text.substring(0, 60) + '..."');
+      // Accept ceiling from background.js
+      if (msg.ceilingMs && msg.ceilingMs > 0) {
+        currentCeilingMs = msg.ceilingMs;
+      }
+
+      console.log('[Chorus] Injecting (ceiling=' + currentCeilingMs + 'ms): "' +
+        text.substring(0, 60) + '..."');
+
+      lastInjectedText = text;  // save for snippet filtering
 
       var injected = injectText(text);
       if (!injected) {
@@ -183,7 +226,6 @@
         return;
       }
 
-      // Small delay to let ProseMirror process, then submit
       setTimeout(function() {
         var submitted = clickSubmit();
         if (!submitted) {
@@ -191,7 +233,6 @@
           return;
         }
 
-        // Clear input after submit so next round injects cleanly.
         setTimeout(function() {
           var input = chorusQuery("input");
           if (input) {
@@ -203,7 +244,6 @@
           }
         }, 500);
 
-        // Watch for response completion
         watchForCompletion(function() {
           var snippet = getLastResponseSnippet();
           console.log("[Chorus] Response complete, snippet: " +
@@ -218,7 +258,7 @@
         sendResponse({ success: true });
       }, 200);
 
-      return true; // async sendResponse
+      return true;
     }
 
     if (msg.type === "chorus:ping") {
@@ -227,5 +267,5 @@
     }
   });
 
-  console.log("[Chorus] Content script loaded on", window.location.href);
+  console.log("[Chorus] Content script v0.3 loaded (stop-button completion detection)");
 })();

@@ -1,10 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <!-- Two circles representing two instances -->
-  <circle cx="16" cy="28" r="8" fill="#533483" stroke="#a0c4ff" stroke-width="2"/>
-  <circle cx="32" cy="28" r="8" fill="#0f3460" stroke="#a0c4ff" stroke-width="2"/>
-  <!-- Bridge/connection line -->
-  <line x1="16" y1="20" x2="32" y2="20" stroke="#a0c4ff" stroke-width="2" stroke-linecap="round"/>
-  <!-- Vertical stems -->
-  <line x1="16" y1="20" x2="16" y2="28" stroke="#a0c4ff" stroke-width="2"/>
-  <line x1="32" y1="20" x2="32" y2="28" stroke="#a0c4ff" stroke-width="2"/>
+  <circle cx="16" cy="24" r="10" fill="#533483" opacity="0.9"/>
+  <circle cx="32" cy="24" r="10" fill="#d46f1d" opacity="0.9"/>
+  <line x1="22" y1="24" x2="26" y2="24" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
 </svg>

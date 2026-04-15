@@ -1,19 +1,19 @@
 /**
- * background.js — Chorus Background Script
- * Coordinates between sidebar and content scripts.
- * Manages the multi-turn AMQ exchange loop.
+ * background.js — Chorus Background Script v0.3
+ * Stop-button completion detection, manual stop, follow-up prompts.
  */
 
 (() => {
   "use strict";
 
   // ── State ──
-  let tabMap = {};        // { "kite": tabId, "wren": tabId }
-  let pendingTabs = {};   // tabs we're waiting on for response completion
-  let loopState = null;   // { round, maxRounds, resolve }
-  let lastResponses = {}; // { agent: "response snippet" } — for empty detection
+  let tabMap = {};
+  let pendingTabs = {};
+  let loopState = null;
+  let lastResponses = {};
+  let stopRequested = false;
 
-  const AMQ_CHECK_PROMPT = 
+  const AMQ_CHECK_PROMPT =
     "[AMQ-CHECK] Check your AMQ inbox (amq_check). " +
     "Read and respond to any messages from the other instance via amq_send. " +
     "If no new messages, reply with: No new AMQ messages.";
@@ -25,9 +25,6 @@
     /new_count.*0/i,
   ];
 
-  // Wraps the user's prompt so both instances write to AMQ before
-  // the check round fires. Without this, both check simultaneously,
-  // find empty mailboxes, and the loop dies on round 1.
   function wrapInitialPrompt(text) {
     return "[CHORUS] " + text + "\n\n" +
       "After processing, write your key thoughts/analysis to AMQ " +
@@ -35,9 +32,18 @@
       "read and respond. Then answer normally.";
   }
 
+  // In round-robin, the second instance should read what the first wrote
+  function wrapFollowUpPrompt(text, firstAgent) {
+    return "[CHORUS] " + text + "\n\n" +
+      "IMPORTANT: " + firstAgent.charAt(0).toUpperCase() + firstAgent.slice(1) +
+      " has already processed this prompt and written analysis to AMQ. " +
+      "Check your AMQ inbox FIRST (amq_check + amq_read), then build on " +
+      "their analysis rather than duplicating work. Write your additional " +
+      "thoughts/analysis to AMQ, then answer normally.";
+  }
+
   function responseIsEmpty(text) {
     if (!text) return false;
-    // Check last 500 chars of response for no-message indicators
     var tail = text.slice(-500).toLowerCase();
     for (var i = 0; i < NO_MSG_PATTERNS.length; i++) {
       if (NO_MSG_PATTERNS[i].test(tail)) return true;
@@ -79,12 +85,13 @@
 
   // ── Send to Tab ──
 
-  async function sendToTab(tabId, text) {
+  async function sendToTab(tabId, text, ceilingMs) {
     try {
       const response = await browser.tabs.sendMessage(tabId, {
         type: "chorus:inject",
         text: text,
         tabId: tabId,
+        ceilingMs: ceilingMs || 300000,
       });
       return response;
     } catch (e) {
@@ -93,73 +100,141 @@
     }
   }
 
-  // ── Multi-Turn AMQ Loop ──
+  // ── Fire to all tabs (simultaneous mode) ──
 
-  async function fireToAllTabs(text) {
+  async function fireToAllTabs(text, ceilingMs) {
     await loadTabMap();
     const agents = Object.keys(tabMap);
-    if (agents.length === 0) {
-      return { error: "No tabs registered" };
-    }
+    if (agents.length === 0) return { error: "No tabs registered" };
 
-    // Track which tabs we're waiting on
     pendingTabs = {};
     lastResponses = {};
     for (const agent of agents) {
       pendingTabs[tabMap[agent]] = agent;
     }
 
-    // Send to all tabs
     const results = {};
     for (const agent of agents) {
       const tabId = tabMap[agent];
       try {
-        // Verify tab still exists
         await browser.tabs.get(tabId);
-        const res = await sendToTab(tabId, text);
+        const res = await sendToTab(tabId, text, ceilingMs);
         results[agent] = res;
       } catch (e) {
         results[agent] = { success: false, error: "tab closed or unreachable" };
         delete pendingTabs[tabId];
       }
     }
-
     return results;
+  }
+
+  // ── Fire to single tab and wait ──
+
+  async function fireToOneTab(agent, text, ceilingMs) {
+    await loadTabMap();
+    const tabId = tabMap[agent];
+    if (!tabId) return { error: `No tab registered for ${agent}` };
+
+    pendingTabs = {};
+    lastResponses = {};
+    pendingTabs[tabId] = agent;
+
+    try {
+      await browser.tabs.get(tabId);
+      const res = await sendToTab(tabId, text, ceilingMs);
+      return res;
+    } catch (e) {
+      delete pendingTabs[tabId];
+      return { success: false, error: "tab closed or unreachable" };
+    }
   }
 
   function allTabsComplete() {
     return Object.keys(pendingTabs).length === 0;
   }
 
-  async function runLoop(text, maxRounds) {
+  // ── Main Loop ──
+
+  async function runLoop(text, maxRounds, mode, ceilingMs) {
     const status = [];
+    const ceiling = ceilingMs || 300000;
+    stopRequested = false;
 
-    // Round 0: Fire initial prompt (wrapped with AMQ write instruction)
-    console.log(`[Chorus] Round 0: firing initial prompt`);
-    broadcastStatus("firing", 0, maxRounds);
-    const r0 = await fireToAllTabs(wrapInitialPrompt(text));
-    status.push({ round: 0, type: "initial", results: r0 });
+    const deadTabTimeout = Math.round(ceiling * 1.5);
 
-    // Wait for all responses
-    await waitForAllResponses();
+    // Round 0: Fire initial prompt
+    console.log(`[Chorus] Round 0: firing initial prompt (${mode} mode, ${ceiling}ms ceiling)`);
+
+    if (mode === "roundrobin") {
+      broadcastStatus("firing-kite", 0, maxRounds);
+      await fireToOneTab("kite", wrapInitialPrompt(text), ceiling);
+      await waitForAllResponses(deadTabTimeout);
+      if (stopRequested) { broadcastStatus("stopped", 0, maxRounds); return status; }
+
+      broadcastStatus("firing-wren", 0, maxRounds);
+      await fireToOneTab("wren", wrapFollowUpPrompt(text, "kite"), ceiling);
+      await waitForAllResponses(deadTabTimeout);
+      if (stopRequested) { broadcastStatus("stopped", 0, maxRounds); return status; }
+
+      status.push({ round: 0, type: "initial-roundrobin" });
+    } else {
+      broadcastStatus("firing", 0, maxRounds);
+      const r0 = await fireToAllTabs(wrapInitialPrompt(text), ceiling);
+      status.push({ round: 0, type: "initial", results: r0 });
+      await waitForAllResponses(deadTabTimeout);
+      if (stopRequested) { broadcastStatus("stopped", 0, maxRounds); return status; }
+    }
+
     broadcastStatus("complete", 0, maxRounds);
 
-    // Rounds 1..N: AMQ check loop
+    // Rounds 1..N
     for (let round = 1; round <= maxRounds; round++) {
-      console.log(`[Chorus] Round ${round}: AMQ check`);
-      broadcastStatus("firing", round, maxRounds);
-
-      const rN = await fireToAllTabs(AMQ_CHECK_PROMPT);
-      status.push({ round, type: "amq_check", results: rN });
-
-      await waitForAllResponses();
-      broadcastStatus("complete", round, maxRounds);
-
-      // Early termination: if both instances reported no messages, stop
-      if (allResponsesEmpty()) {
-        console.log(`[Chorus] Round ${round}: both instances report empty — terminating early`);
-        broadcastStatus("done-early", round, maxRounds);
+      if (stopRequested) {
+        console.log(`[Chorus] Stop requested — halting at round ${round}`);
+        broadcastStatus("stopped", round, maxRounds);
         return status;
+      }
+
+      console.log(`[Chorus] Round ${round}: AMQ check (${mode})`);
+
+      if (mode === "roundrobin") {
+        broadcastStatus("firing-kite", round, maxRounds);
+        await fireToOneTab("kite", AMQ_CHECK_PROMPT, ceiling);
+        await waitForAllResponses(deadTabTimeout);
+        if (stopRequested) { broadcastStatus("stopped", round, maxRounds); return status; }
+
+        const kiteEmpty = responseIsEmpty(lastResponses["kite"]);
+
+        broadcastStatus("firing-wren", round, maxRounds);
+        await fireToOneTab("wren", AMQ_CHECK_PROMPT, ceiling);
+        await waitForAllResponses(deadTabTimeout);
+        if (stopRequested) { broadcastStatus("stopped", round, maxRounds); return status; }
+
+        const wrenEmpty = responseIsEmpty(lastResponses["wren"]);
+
+        status.push({ round, type: "roundrobin", kiteEmpty, wrenEmpty });
+        broadcastStatus("complete", round, maxRounds);
+
+        if (kiteEmpty && wrenEmpty) {
+          console.log(`[Chorus] Round ${round}: both empty — terminating`);
+          broadcastStatus("done-early", round, maxRounds);
+          return status;
+        }
+
+      } else {
+        // ── Simultaneous: original behavior ──
+        broadcastStatus("firing", round, maxRounds);
+        const rN = await fireToAllTabs(AMQ_CHECK_PROMPT, ceiling);
+        status.push({ round, type: "amq_check", results: rN });
+
+        await waitForAllResponses(deadTabTimeout);
+        broadcastStatus("complete", round, maxRounds);
+
+        if (allResponsesEmpty()) {
+          console.log(`[Chorus] Round ${round}: both empty — terminating`);
+          broadcastStatus("done-early", round, maxRounds);
+          return status;
+        }
       }
     }
 
@@ -167,13 +242,32 @@
     return status;
   }
 
-  function waitForAllResponses() {
+  function waitForAllResponses(timeoutMs) {
     return new Promise((resolve) => {
       if (allTabsComplete()) {
         resolve();
         return;
       }
       loopState = { resolve };
+
+      // Dead-tab safety: if no response arrives within timeout,
+      // declare remaining tabs dead and move on.
+      if (timeoutMs && timeoutMs > 0) {
+        setTimeout(() => {
+          if (!allTabsComplete()) {
+            const deadAgents = Object.values(pendingTabs);
+            console.warn(`[Chorus] Dead-tab timeout: ${deadAgents.join(", ")} did not respond within ${timeoutMs}ms`);
+            for (const agent of deadAgents) {
+              lastResponses[agent] = "[TIMEOUT — no response]";
+            }
+            pendingTabs = {};
+            if (loopState) {
+              loopState.resolve();
+              loopState = null;
+            }
+          }
+        }, timeoutMs);
+      }
     });
   }
 
@@ -183,21 +277,19 @@
       state,
       round,
       maxRounds,
-    }).catch(() => {}); // sidebar might not be open
+    }).catch(() => {});
   }
 
   // ── Message Handlers ──
 
   browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
-    // Content script reports response complete
     if (msg.type === "chorus:response-complete") {
       const tabId = msg.tabId || (sender.tab && sender.tab.id);
       if (tabId && pendingTabs[tabId]) {
         const agent = pendingTabs[tabId];
         console.log(`[Chorus] ${agent} (tab ${tabId}) response complete`);
 
-        // Store response snippet for empty detection
         if (msg.responseSnippet) {
           lastResponses[agent] = msg.responseSnippet;
           console.log(`[Chorus] ${agent} snippet: "${msg.responseSnippet.substring(0, 80)}..."`);
@@ -213,7 +305,6 @@
       return;
     }
 
-    // Sidebar: register a tab
     if (msg.type === "chorus:register") {
       registerTab(msg.agent, msg.tabId).then(() => {
         sendResponse({ success: true });
@@ -221,7 +312,6 @@
       return true;
     }
 
-    // Sidebar: get registered tabs
     if (msg.type === "chorus:get-tabs") {
       getRegisteredTabs().then((tabs) => {
         sendResponse(tabs);
@@ -229,10 +319,9 @@
       return true;
     }
 
-    // Sidebar: fire prompt with AMQ loop
     if (msg.type === "chorus:fire") {
-      const { text, rounds } = msg;
-      runLoop(text, rounds || 3).then((status) => {
+      const { text, rounds, mode, ceilingMs } = msg;
+      runLoop(text, rounds || 3, mode || "roundrobin", ceilingMs || 300000).then((status) => {
         sendResponse({ success: true, status });
       }).catch((e) => {
         sendResponse({ success: false, error: e.message });
@@ -240,15 +329,20 @@
       return true;
     }
 
-    // Sidebar: fire to single tab (for testing)
+    if (msg.type === "chorus:stop") {
+      console.log("[Chorus] Stop requested by user");
+      stopRequested = true;
+      sendResponse({ success: true });
+      return;
+    }
+
     if (msg.type === "chorus:fire-single") {
-      sendToTab(msg.tabId, msg.text).then((res) => {
+      sendToTab(msg.tabId, msg.text, msg.ceilingMs).then((res) => {
         sendResponse(res);
       });
       return true;
     }
 
-    // Sidebar: list Claude tabs for registration
     if (msg.type === "chorus:list-claude-tabs") {
       browser.tabs.query({ url: "*://claude.ai/*" }).then((tabs) => {
         sendResponse(tabs.map(t => ({
@@ -261,5 +355,5 @@
     }
   });
 
-  console.log("[Chorus] Background script loaded");
+  console.log("[Chorus] Background script v0.2 loaded (round-robin support)");
 })();

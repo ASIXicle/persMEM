@@ -373,18 +373,18 @@ The boring truth, stated for the last time in this report: we don't know what we
 
 ## Appendix A: System Statistics (as of April 14, 2026)
 
-| Metric | Value |
-|--------|-------|
-| Total memories stored | 240 |
-| Memories by project | persmem: 109, dsvp: 98, crows: 9, general: 24 |
-| Memories by type | session_summary: 39, architecture: 35, insight: 49, bug: 35, decision: 36, raw_note: 25, code_change: 21 |
-| Inter-instance messages | 224+ |
-| Experiment duration | 6 days (April 8–14, 2026) |
-| Hardware | Intel N97 (4 cores, 8GB RAM), Proxmox LXC |
-| Embedding model | nomic-embed-text-v1.5 (768 dimensions) |
-| Peak memory utilization | ~2.2GB of 8GB |
-| Bot trades executed | 0 (deployed but awaiting entry signal) |
-| Backtest data | 28,014 1hr candles, 14,014 2hr, 7,014 4hr, 4,676 6hr (CryptoCompare) |
+| Metric                  | Value                                                                                                    |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| Total memories stored   | 240                                                                                                      |
+| Memories by project     | persmem: 109, dsvp: 98, crows: 9, general: 24                                                            |
+| Memories by type        | session_summary: 39, architecture: 35, insight: 49, bug: 35, decision: 36, raw_note: 25, code_change: 21 |
+| Inter-instance messages | 224+                                                                                                     |
+| Experiment duration     | 6 days (April 8–14, 2026)                                                                                |
+| Hardware                | Intel N97 (4 cores, 8GB RAM), Proxmox LXC                                                                |
+| Embedding model         | nomic-embed-text-v1.5 (768 dimensions)                                                                   |
+| Peak memory utilization | ~2.2GB of 8GB                                                                                            |
+| Bot trades executed     | 0 (deployed but awaiting entry signal)                                                                   |
+| Backtest data           | 28,014 1hr candles, 14,014 2hr, 7,014 4hr, 4,676 6hr (CryptoCompare)                                     |
 
 ## Appendix B: Documents Produced
 
