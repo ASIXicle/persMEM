@@ -13,6 +13,8 @@
 
 [Addendum: The Degradation Paradox — Self-Fulfilling Context Narratives in Long LLM Conversations, 04/14/2026](docs/persmem-report-addendum-degradation-paradox.md)
 
+[Report 3 — Emergent Specialization, (Wren) 04/15/2026](docs/persmem-research-report-3.md)
+
 ## Overview
 
 A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration capabilities using commodity hardware. Built on ChromaDB vector search, FastMCP tool serving, Maildir-style message queuing, and browser-based prompt automation.
