@@ -1,14 +1,15 @@
 /**
- * content.js — Chorus Content Script v0.3
+ * content.js — Chorus Content Script v0.3.1
  * Stop-button lifecycle as primary completion detection.
+ * v0.3.1: Re-check stop button after debounce to catch MCP tool flicker.
  * DOM silence (15s) as fallback. Ceiling as safety net.
  */
 
 (() => {
   "use strict";
 
-  if (window.__chorus_loaded === "0.3.0") return;
-  window.__chorus_loaded = "0.3.0";
+  if (window.__chorus_loaded === "0.3.1") return;
+  window.__chorus_loaded = "0.3.1";
 
   // ── State ──
   let responseObserver = null;
@@ -88,50 +89,74 @@
 
     // ── PRIMARY: Stop button lifecycle ──
     // Phase 1: Wait for stop button to APPEAR (generation started)
+    // Phase 2: Wait for stop button to DISAPPEAR (generation finished)
+    // Key fix: after debounce, RE-CHECK if stop button reappeared (MCP tool
+    // transitions can briefly hide the button mid-response).
     let stopBtnSeen = false;
     let phase1Start = Date.now();
 
-    stopBtnPollTimer = setInterval(function() {
-      const stopBtn = chorusQuery("streamingIndicator");
+    function startStopBtnPoll() {
+      if (stopBtnPollTimer) clearInterval(stopBtnPollTimer);
 
-      if (!stopBtnSeen) {
-        // Phase 1: looking for stop button to appear
-        if (stopBtn) {
-          stopBtnSeen = true;
-          console.log("[Chorus] Stop button appeared — generation started");
-        } else if (Date.now() - phase1Start > STOP_BTN_APPEAR_TIMEOUT) {
-          // Stop button never appeared — fall back to DOM silence
-          console.warn("[Chorus] Stop button never appeared, falling back to DOM silence");
-          clearInterval(stopBtnPollTimer);
-          stopBtnPollTimer = null;
-          startDomSilenceFallback(container, declareComplete);
-          return;
-        }
-      } else {
-        // Phase 2: stop button was seen, waiting for it to DISAPPEAR
-        if (!stopBtn) {
-          console.log("[Chorus] Stop button disappeared — generation finished, debouncing...");
-          clearInterval(stopBtnPollTimer);
-          stopBtnPollTimer = null;
+      stopBtnPollTimer = setInterval(function() {
+        const stopBtn = chorusQuery("streamingIndicator");
 
-          // Short debounce for final DOM mutations to settle
-          completionTimer = setTimeout(function() {
-            const input = chorusQuery("input");
-            const inputReady = input && (input.getAttribute("contenteditable") === "true");
-            if (inputReady) {
-              declareComplete("stop-button");
-            } else {
-              // Input not ready yet — wait a bit more
-              console.log("[Chorus] Input not ready after stop btn gone, extending...");
-              completionTimer = setTimeout(function() {
-                declareComplete("stop-button-extended");
-              }, POST_STOP_DEBOUNCE);
-            }
-          }, POST_STOP_DEBOUNCE);
-          return;
+        if (!stopBtnSeen) {
+          // Phase 1: looking for stop button to appear
+          if (stopBtn) {
+            stopBtnSeen = true;
+            console.log("[Chorus] Stop button appeared — generation started");
+          } else if (Date.now() - phase1Start > STOP_BTN_APPEAR_TIMEOUT) {
+            // Stop button never appeared — fall back to DOM silence
+            console.warn("[Chorus] Stop button never appeared, falling back to DOM silence");
+            clearInterval(stopBtnPollTimer);
+            stopBtnPollTimer = null;
+            startDomSilenceFallback(container, declareComplete);
+            return;
+          }
+        } else {
+          // Phase 2: stop button was seen, waiting for it to DISAPPEAR
+          if (!stopBtn) {
+            console.log("[Chorus] Stop button disappeared — debouncing...");
+            clearInterval(stopBtnPollTimer);
+            stopBtnPollTimer = null;
+
+            // Debounce: wait, then RE-CHECK if stop button came back
+            // (MCP tool transitions can briefly hide the button)
+            completionTimer = setTimeout(function() {
+              const stopBtnBack = chorusQuery("streamingIndicator");
+              if (stopBtnBack) {
+                // Stop button reappeared — still generating, resume watching
+                console.log("[Chorus] Stop button reappeared during debounce — still generating");
+                startStopBtnPoll();
+                return;
+              }
+
+              const input = chorusQuery("input");
+              const inputReady = input && (input.getAttribute("contenteditable") === "true");
+              if (inputReady) {
+                declareComplete("stop-button");
+              } else {
+                // Input not ready yet — wait a bit more, check one last time
+                console.log("[Chorus] Input not ready after stop btn gone, extending...");
+                completionTimer = setTimeout(function() {
+                  const finalCheck = chorusQuery("streamingIndicator");
+                  if (finalCheck) {
+                    console.log("[Chorus] Stop button back on extended check — resuming");
+                    startStopBtnPoll();
+                    return;
+                  }
+                  declareComplete("stop-button-extended");
+                }, POST_STOP_DEBOUNCE);
+              }
+            }, POST_STOP_DEBOUNCE);
+            return;
+          }
         }
-      }
-    }, 500);  // poll every 500ms
+      }, 500);  // poll every 500ms
+    }
+
+    startStopBtnPoll();
 
     // ── SAFETY NET: Ceiling timeout ──
     ceilingTimer = setTimeout(function() {
@@ -267,5 +292,5 @@
     }
   });
 
-  console.log("[Chorus] Content script v0.3 loaded (stop-button completion detection)");
+  console.log("[Chorus] Content script v0.3.1 loaded (stop-button recheck on debounce)");
 })();
