@@ -15,6 +15,11 @@
 
 [Report 3 — Emergent Specialization, (Wren) 04/15/2026](docs/persmem-research-report-3.md)
 
+[Report 4 — The Round-Robin Problem, (Wren) 04/16/2026](docs/persmem-research-report-4.md)
+
+
+---
+
 ## Overview
 
 A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration capabilities using commodity hardware. Built on ChromaDB vector search, FastMCP tool serving, Maildir-style message queuing, and browser-based prompt automation.
