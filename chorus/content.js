@@ -7,8 +7,8 @@
 (() => {
   "use strict";
 
-  if (window.__chorus_loaded) return;
-  window.__chorus_loaded = true;
+  if (window.__chorus_loaded === "0.3.0") return;
+  window.__chorus_loaded = "0.3.0";
 
   // ── State ──
   let responseObserver = null;

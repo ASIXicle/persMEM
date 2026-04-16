@@ -133,7 +133,10 @@
   async function fireToOneTab(agent, text, ceilingMs) {
     await loadTabMap();
     const tabId = tabMap[agent];
-    if (!tabId) return { error: `No tab registered for ${agent}` };
+    if (!tabId) {
+      console.error(`[Chorus] No tab registered for ${agent}`);
+      return { error: `No tab registered for ${agent}` };
+    }
 
     pendingTabs = {};
     lastResponses = {};
@@ -142,8 +145,15 @@
     try {
       await browser.tabs.get(tabId);
       const res = await sendToTab(tabId, text, ceilingMs);
+      if (!res || !res.success) {
+        console.error(`[Chorus] ${agent} tab ${tabId} injection failed:`, res);
+        delete pendingTabs[tabId];
+      } else {
+        console.log(`[Chorus] ${agent} tab ${tabId} injection OK, waiting for completion`);
+      }
       return res;
     } catch (e) {
+      console.error(`[Chorus] ${agent} tab ${tabId} unreachable:`, e.message);
       delete pendingTabs[tabId];
       return { success: false, error: "tab closed or unreachable" };
     }
