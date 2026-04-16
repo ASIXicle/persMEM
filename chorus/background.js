@@ -85,8 +85,9 @@
 
   // ── Send to Tab ──
 
-  async function sendToTab(tabId, text, ceilingMs) {
+async function sendToTab(tabId, text, ceilingMs) {
     try {
+      await browser.tabs.update(tabId, { active: true });
       const response = await browser.tabs.sendMessage(tabId, {
         type: "chorus:inject",
         text: text,
