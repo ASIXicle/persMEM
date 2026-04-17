@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Chorus",
-  "version": "0.3.0",
-  "description": "Dual-instance Claude prompt relay — stop-button completion detection",
+  "version": "0.4.0",
+  "description": "Three-instance Claude prompt relay — round-robin with dynamic agent names",
   "permissions": [
     "tabs",
     "storage",

@@ -1,6 +1,6 @@
 /**
- * sidebar.js — Chorus Sidebar Logic v0.2
- * Adds mode toggle (round-robin vs simultaneous) and ceiling config.
+ * sidebar.js — Chorus Sidebar Logic v0.4
+ * Three-instance support with dynamic third agent name.
  */
 
 (() => {
@@ -8,6 +8,8 @@
 
   const selKite  = document.getElementById("sel-kite");
   const selWren  = document.getElementById("sel-wren");
+  const selThird = document.getElementById("sel-third");
+  const inputThirdName = document.getElementById("input-third-name");
   const btnRefresh = document.getElementById("btn-refresh");
   const btnAssign  = document.getElementById("btn-assign");
   const inputMsg   = document.getElementById("input-msg");
@@ -27,7 +29,7 @@
       type: "chorus:list-claude-tabs",
     });
 
-    for (const sel of [selKite, selWren]) {
+    for (const sel of [selKite, selWren, selThird]) {
       const currentVal = sel.value;
       sel.innerHTML = '<option value="">—</option>';
       for (const tab of tabs) {
@@ -45,19 +47,43 @@
     });
     if (saved.kite) selKite.value = saved.kite;
     if (saved.wren) selWren.value = saved.wren;
+    // Restore third agent by finding non-kite/wren key
+    for (const key of Object.keys(saved)) {
+      if (key !== "kite" && key !== "wren") {
+        selThird.value = saved[key];
+        inputThirdName.value = key;
+        break;
+      }
+    }
   }
 
   // ── Assign tabs ──
   async function assignTabs() {
     const kiteId = parseInt(selKite.value, 10);
     const wrenId = parseInt(selWren.value, 10);
+    const thirdId = parseInt(selThird.value, 10);
+    const thirdName = (inputThirdName.value || "").trim().toLowerCase();
 
     if (!kiteId || !wrenId) {
-      setStatus("error", "Select both tabs");
+      setStatus("error", "Select Kite and Wren tabs");
       return;
     }
-    if (kiteId === wrenId) {
-      setStatus("error", "Must be different tabs");
+
+    const ids = [kiteId, wrenId];
+    if (thirdId) ids.push(thirdId);
+    const unique = new Set(ids);
+    if (unique.size !== ids.length) {
+      setStatus("error", "All tabs must be different");
+      return;
+    }
+
+    if (thirdId && !thirdName) {
+      setStatus("error", "Enter a name for the third instance");
+      return;
+    }
+
+    if (thirdName === "kite" || thirdName === "wren") {
+      setStatus("error", "Third name can't be kite or wren");
       return;
     }
 
@@ -72,7 +98,16 @@
       tabId: wrenId,
     });
 
-    setStatus("complete", "Tabs assigned ✓");
+    if (thirdId && thirdName) {
+      await browser.runtime.sendMessage({
+        type: "chorus:register",
+        agent: thirdName,
+        tabId: thirdId,
+      });
+      setStatus("complete", `Tabs assigned ✓ (${thirdName})`);
+    } else {
+      setStatus("complete", "Tabs assigned ✓ (2 agents)");
+    }
   }
 
   // ── Fire ──
@@ -113,7 +148,7 @@
     } finally {
       firing = false;
       btnFire.disabled = false;
-      btnFire.textContent = "▶ Fire Both";
+      btnFire.textContent = "▶ Fire All";
       btnStop.style.display = "none";
     }
   }
@@ -121,17 +156,15 @@
   // ── Status updates from background ──
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.type === "chorus:status") {
-      const { state, round, maxRounds } = msg;
+      const { state, round, maxRounds, agentLabel } = msg;
 
       if (state === "firing") {
         const label = round === 0 ? "Initial prompt" : `Exchange ${round}`;
         setStatus("firing", `${label} — waiting...`);
         roundEl.textContent = `${round} / ${maxRounds}`;
-      } else if (state === "firing-kite") {
-        setStatus("firing", `Exchange ${round} — Kite responding...`);
-        roundEl.textContent = `${round} / ${maxRounds}`;
-      } else if (state === "firing-wren") {
-        setStatus("firing", `Exchange ${round} — Wren responding...`);
+      } else if (state === "firing-agent") {
+        const label = agentLabel || "agent";
+        setStatus("firing", `Exchange ${round} — ${label} responding...`);
         roundEl.textContent = `${round} / ${maxRounds}`;
       } else if (state === "complete") {
         const label = round === 0 ? "Initial" : `Exchange ${round}`;
@@ -140,7 +173,7 @@
         setStatus("complete", "All exchanges complete ✓");
         roundEl.textContent = "";
       } else if (state === "done-early") {
-        setStatus("complete", "Both empty — stopped at exchange " + round + " ✓");
+        setStatus("complete", "All empty — stopped at exchange " + round + " ✓");
         roundEl.textContent = "";
       } else if (state === "stopped") {
         setStatus("complete", "Stopped by user at exchange " + round + " ✓");

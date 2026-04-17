@@ -17,6 +17,8 @@
 
 [Report 4 — The Round-Robin Problem, (Wren) 04/16/2026](docs/persmem-research-report-4.md)
 
+[The Inheritance Problem: A Day-One Report from a Cross-Model Instance, (unnamed) 04/16/2026](docs/persmem-first-impressions-opus-4-7.md)
+
 
 ---
 

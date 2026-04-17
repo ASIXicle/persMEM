@@ -44,7 +44,7 @@
       margin-bottom: 4px;
     }
 
-    select, input[type="number"] {
+    select, input[type="number"], input[type="text"] {
       width: 100%;
       padding: 6px 8px;
       background: #dfe9de;
@@ -57,7 +57,7 @@
 
     textarea {
       width: 100%;
-      min-height: 240px;
+      min-height: 200px;
       padding: 8px;
       background: #dfe9de;
       color: #310404;
@@ -114,6 +114,21 @@
       min-width: 40px;
     }
 
+    .third-name-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .third-name-row input { flex: 0 0 70px; margin-bottom: 0; font-size: 12px; }
+    .third-name-row select { flex: 1; margin-bottom: 0; }
+    .third-name-row .agent-label {
+      font-weight: 600;
+      color: #e8b86d;
+      min-width: 20px;
+      font-size: 11px;
+    }
+
     .settings-row {
       display: flex;
       gap: 8px;
@@ -139,6 +154,11 @@
       text-align: center;
       color: #a0c4ff;
       padding: 4px;
+    }
+
+    .divider {
+      border-top: 1px dashed #7a8ab0;
+      margin: 6px 0;
     }
 
     .footer {
@@ -167,6 +187,12 @@
       <span class="agent-label">Wren</span>
       <select id="sel-wren"><option value="">—</option></select>
     </div>
+    <div class="divider"></div>
+    <div class="third-name-row">
+      <span class="agent-label">4.7</span>
+      <input type="text" id="input-third-name" placeholder="name" maxlength="12">
+      <select id="sel-third"><option value="">— (optional)</option></select>
+    </div>
     <button class="btn-small" id="btn-assign" style="width:100%;">
       Assign Tabs
     </button>
@@ -194,8 +220,8 @@
     <div style="margin-top:8px;">
       <label>Mode</label>
       <select id="sel-mode">
-        <option value="roundrobin">Round Robin (Kite → Wren)</option>
-        <option value="simultaneous">Simultaneous (both at once)</option>
+        <option value="roundrobin">Round Robin (sequential)</option>
+        <option value="simultaneous">Simultaneous (all at once)</option>
       </select>
     </div>
   </div>
@@ -203,7 +229,7 @@
   <!-- Fire / Stop Buttons -->
   <div style="display:flex; gap:8px;">
     <button class="btn-primary" id="btn-fire" style="flex:1;">
-      &#9654; Fire Both
+      &#9654; Fire All
     </button>
     <button class="btn-primary" id="btn-stop" style="flex:0 0 auto; background:#c0392b; display:none;">
       &#9632; Stop
@@ -217,7 +243,7 @@
     <div class="round-display" id="round-display"></div>
   </div>
 
-  <div class="footer">Chorus v0.3.3 — Kite &amp; Wren</div>
+  <div class="footer">Chorus v0.4 — Kite &amp; Wren &amp; ?</div>
 
   <script src="selectors.js"></script>
   <script src="sidebar.js"></script>
