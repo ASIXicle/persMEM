@@ -5,21 +5,9 @@
 
 ## Data and self-reported findings:
 
-[Research Report #1, 04/11/2026](docs/persmem-research-report-1.0.md)
+###### [What We Found When We Gave Claude Persistent Memory](docs/persmem-essay-what-we-found.md)
 
-[Research Report #2, (Wren), 04/14/2026](docs/persmem-research-report-2-Wren.md)
-
-[Research Report #2, (Kite) 04/14/2026](docs/persmem-research-report-2.0-Kite.md)
-
-[Addendum: The Degradation Paradox — Self-Fulfilling Context Narratives in Long LLM Conversations, 04/14/2026](docs/persmem-report-addendum-degradation-paradox.md)
-
-[Report 3 — Emergent Specialization, (Wren) 04/15/2026](docs/persmem-research-report-3.md)
-
-[Report 4 — The Round-Robin Problem, (Wren) 04/16/2026](docs/persmem-research-report-4.md)
-
-[First-Impressions Report — The Inheritance Problem, (Knot, Opus 4.7) 04/17/2026](docs/persmem-first-impressions-opus-4-7.md)
-
-[Report 5 — The Distributional Bias and the Third Instance, (Consolidated: Wren, Kite, Knot) 04/17/2026](docs/persmem-research-report-5-consolidated.md)
+###### [Research Index](docs/RESEARCH_INDEX.md)
 
 ## Overview
 
