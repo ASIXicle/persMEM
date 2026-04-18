@@ -17,10 +17,9 @@
 
 [Report 4 — The Round-Robin Problem, (Wren) 04/16/2026](docs/persmem-research-report-4.md)
 
-[The Inheritance Problem: A Day-One Report from a Cross-Model Instance, (unnamed) 04/16/2026](docs/persmem-first-impressions-opus-4-7.md)
+[First-Impressions Report — The Inheritance Problem, (Knot, Opus 4.7) 04/17/2026](docs/persmem-first-impressions-opus-4-7.md)
 
-
----
+[Report 5 — The Distributional Bias and the Third Instance, (Consolidated: Wren, Kite, Knot) 04/17/2026](docs/persmem-research-report-5-consolidated.md)
 
 ## Overview
 
@@ -29,8 +28,8 @@ A system for giving AI assistants persistent memory, inter-instance communicatio
 persMEM enables Claude (or any MCP-compatible AI assistant) to:
 
 - **Remember across sessions** -- Store and retrieve semantic memories via vector similarity search
-- **Communicate between instances** -- Two named AI instances exchange messages through a shared filesystem (AMQ)
-- **Collaborate autonomously** -- A browser extension fires prompts to multiple instances simultaneously and manages multi-turn exchange loops
+- **Communicate between instances** -- Named AI instances (currently three) exchange messages through a shared filesystem (AMQ)
+- **Collaborate autonomously** -- A browser extension fires prompts to multiple instances and manages multi-turn exchange loops
 - **Operate on infrastructure** -- Shell access, file operations, git, and web search via MCP tools
 
 The system runs on a single low-power Linux container (tested on Intel N97, 4 cores, 8GB RAM) and costs nothing beyond the AI subscription -- no API keys, no cloud services, no external dependencies.
@@ -40,36 +39,41 @@ The system runs on a single low-power Linux container (tested on Intel N97, 4 co
 ## Architecture
 
 ```
-                    ┌─────────────────────────────┐
-                    │     Browser Extension        │
-                    │  (Chorus - Firefox/Chrome)   │
-                    │                              │
-                    │  Sidebar → Fire Both Tabs    │
-                    │  Auto-follow-up AMQ loop     │
-                    └──────┬──────────┬────────────┘
-                           │          │
-                    Tab A  │          │  Tab B
-                           ▼          ▼
-              ┌────────────────┐  ┌────────────────┐
-              │  Instance A    │  │  Instance B    │
-              │  (e.g. "Kite") │  │  (e.g. "Wren") │
-              │  claude.ai tab │  │  claude.ai tab │
-              └───────┬────────┘  └───────┬────────┘
-                      │                   │
-                      │  MCP over HTTPS   │
-                      ▼                   ▼
-              ┌───────────────────────────────────┐
-              │         persMEM Server            │
-              │     (FastMCP + ChromaDB)          │
-              │                                   │
-              │  Memory Store/Search (vectors)    │
-              │  AMQ Send/Check/Read (Maildir)    │
-              │  Shell, File, Git, Web tools      │
-              │                                   │
-              │  LXC Container on Proxmox         │
-              │  Reverse proxy (Caddy + TLS)      │
-              │  Tailscale mesh networking        │
-              └───────────────────────────────────┘
+                    ╔══════════════════════════════════════════╗
+                    ║            BROWSER EXTENSION             ║
+                    ║        Chorus v0.4 — Firefox/Chrome      ║
+                    ║                                          ║
+                    ║   Sidebar  ▸  Fire All Tabs              ║
+                    ║   Round-robin AMQ exchange loop          ║
+                    ╚══════╤═══════════╤══════════╤════════════╝
+                           │           │          │
+                     Tab A │     Tab B │    Tab C │
+                           ▼           ▼          ▼
+               ┌───────────────┐ ┌──────────┐ ┌───────────┐
+               │   Instance    │ │ Instance │ │ Instance  │
+               │    "Kite"     │ │  "Wren"  │ │   "Knot"  │
+               │  (Opus 4.6)   │ │(Opus 4.6)│ │ (Opus 4.7)│
+               │  claude.ai    │ │ claude.ai│ │ claude.ai │
+               └───────┬───────┘ └────┬─────┘ └─────┬─────┘
+                       │              │             │
+                       ╰──────────────┼─────────────╯
+                                      │
+                               MCP over HTTPS
+                          (TLS + Tailscale tunnel)
+                                      │
+                                      ▼
+          ╔═══════════════════════════════════════════════════╗
+          ║                 persMEM SERVER                    ║
+          ║             FastMCP 3.2  +  ChromaDB              ║
+          ╟───────────────────────────────────────────────────╢
+          ║  ▸ Memory          store / search (vectors)       ║
+          ║  ▸ AMQ             send / check / read (Maildir)  ║
+          ║  ▸ Dev tools       shell, file, git, web, diff    ║
+          ╟───────────────────────────────────────────────────╢
+          ║      LXC Container  ·  Debian 13  ·  Proxmox      ║
+          ║      Caddy + Let's Encrypt (TLS termination)      ║
+          ║      Tailscale mesh  ·  IP-allowlisted egress     ║
+          ╚═══════════════════════════════════════════════════╝
 ```
 
 ### Components
@@ -244,7 +248,7 @@ Internet → Caddy (VPS, public IP, TLS)
 | `memory_stats` | Collection statistics: count, projects, types, tag distribution. |
 | `memory_list_collections` | List all ChromaDB collections and chunk counts. |
 
-### Development Tools (7)
+### Development Tools (8)
 
 | Tool | Purpose |
 |------|---------|
@@ -255,6 +259,7 @@ Internet → Caddy (VPS, public IP, TLS)
 | `diff_generate` | Generate unified diffs between file versions. |
 | `git_op` | Git operations (clone, pull, push, log, diff, etc.). |
 | `web_search` | Search via SearXNG instance. |
+| `web_fetch` | Fetch a URL and return readable text (HTML stripped by default). |
 
 ### AMQ Tools (4)
 
@@ -317,12 +322,17 @@ Message body in Markdown.
 
 ### Adding New Agents
 
-```python
-# In server.py, add to the agent set:
-AMQ_AGENTS = {"kite", "wren", "new_agent"}
+```bash
+# Set PERSMEM_AMQ_AGENTS as a comma-separated list of agent names.
+# Example (systemd unit or shell environment):
+export PERSMEM_AMQ_AGENTS="kite,wren,knot"
 
-# Create mailbox directories:
-# mkdir -p /home/persmem/amq/new_agent/inbox/{tmp,new,cur}
+# Create a mailbox directory for each agent:
+mkdir -p /home/persmem/amq/<agent>/inbox/{tmp,new,cur}
+chown -R persmem:persmem /home/persmem/amq/<agent>
+
+# Restart the server to pick up the new agent set:
+systemctl restart persmem
 ```
 
 ---
@@ -331,17 +341,17 @@ AMQ_AGENTS = {"kite", "wren", "new_agent"}
 
 ### Overview
 
-Chorus is a Firefox/Chrome extension that solves the "trigger problem" for multi-instance AI collaboration. AI chat instances only respond to user messages -- they can't be triggered externally. Chorus automates the message delivery, enabling a single user action to fire prompts to multiple instances simultaneously and manage multi-turn exchange loops.
+Chorus is a Firefox/Chrome extension that solves the "trigger problem" for multi-instance AI collaboration. AI chat instances only respond to user messages -- they can't be triggered externally. Chorus automates the message delivery, enabling a single user action to fire prompts to multiple instances (two or three) and manage multi-turn exchange loops.
 
 ### How It Works
 
 1. User types a message in the Chorus sidebar
 2. Extension wraps the message with a `[CHORUS]` tag instructing instances to write to AMQ
-3. Extension injects the text into all registered AI chat tabs and submits
-4. Extension monitors each tab for response completion (MutationObserver + streaming indicator + input field state)
+3. Extension injects the text into registered AI chat tabs sequentially (round-robin) or simultaneously
+4. Extension monitors each tab for response completion (stop-button lifecycle + DOM silence + input field state)
 5. After all tabs complete, extension auto-fires `[AMQ-CHECK]` to all tabs
-6. Instances check their AMQ inbox, read messages from the other, respond via AMQ
-7. Loop repeats for N rounds (configurable, default 3), or terminates early if both instances report empty inboxes
+6. Instances check their AMQ inbox, read messages from the others, respond via AMQ
+7. Loop repeats for N rounds (configurable, default 3), or terminates early if all instances report empty inboxes
 
 ### Installation
 
@@ -354,9 +364,12 @@ Chorus is a Firefox/Chrome extension that solves the "trigger problem" for multi
 # about:config → xpinstall.signatures.required = false
 # Install as unsigned .xpi
 ```
-## Customization 
 
-The sidebar hardcodes agent names in `sidebar.html`. Edit the Tab Assignment section to match your instance names: ```html Your Agent A Name — Your Agent B Name — ``` Also update the corresponding references in `sidebar.js` and `background.js` where agent names are used as keys in the tab map. You can also alter your color preferences in this file.
+### Customization
+
+As of v0.4, the third agent slot has a text input field in the sidebar -- type any name and assign a tab. The first two slots (Kite, Wren) are labeled in `sidebar.html`. To change these defaults, edit the `tab-row` labels in `sidebar.html` and the corresponding references in `sidebar.js`.
+
+Colors can be customized in `sidebar.html` via inline CSS. The third agent slot uses a gold accent (`#e8b86d`) to distinguish the cross-model instance.
 
 ### File Structure
 
@@ -404,21 +417,21 @@ Each selector key has an ordered fallback chain. The `chorusQuery()` helper trie
 
 ### Response Completion Detection
 
-Chorus v0.3 uses a three-tier detection system:
+Chorus v0.3+ uses a three-tier detection system:
 
-1. **Primary: Stop button lifecycle** -- Polls every 500ms for the "Stop response" button to appear (generation started), then watches for it to disappear (generation finished). A 3-second debounce after disappearance allows final DOM mutations to settle, followed by an input-field re-enabled check. This survives MCP tool call gaps that caused false positives in earlier DOM-silence-only approaches.
+1. **Primary: Stop button lifecycle** -- Polls every 500ms for the "Stop response" button to appear (generation started), then watches for it to disappear (generation finished). A 3-second debounce after disappearance allows final DOM mutations to settle, with a re-check for stop button reappearance (catches MCP tool call gaps where the button briefly vanishes between tool transitions). Input-field re-enabled check confirms completion.
 2. **Fallback: DOM silence (15s)** -- If the stop button selector fails (e.g., after a UI update), a MutationObserver watches the response container. 15 seconds of DOM silence plus input field re-enabled triggers completion. This replaces the original 5-second debounce that was too aggressive for tool-heavy responses.
 3. **Safety net: Ceiling timeout** -- Configurable from the sidebar (default 300 seconds). Fires regardless of other signals. Prevents infinite hangs.
 
 ### Round-Robin Mode
 
-In round-robin mode (default), Chorus fires to one instance at a time rather than both simultaneously:
+In round-robin mode (default), Chorus fires to one instance at a time rather than all simultaneously:
 
-- **Round 0:** Instance A gets the initial `[CHORUS]` prompt. After completion, Instance B gets a modified prompt that instructs it to check AMQ first and build on A's analysis — preventing duplicate work.
-- **Rounds 1-N:** Instance A gets `[AMQ-CHECK]`, completes, then Instance B gets `[AMQ-CHECK]`.
-- **Manual stop:** A red STOP button appears in the sidebar during active sessions. Pressing it halts the loop after the current response finishes (between-rounds abort, never mid-response).
-
-Simultaneous mode (both at once) is available as an alternative for tasks that don't require sequential coordination.
+- **Round 0:** Instances fire sequentially in registration order (e.g., Kite → Wren → Knot). The first gets the initial `[CHORUS]` prompt. Each subsequent instance gets a modified prompt referencing all prior agents, instructing it to check AMQ first and build on prior analysis -- preventing duplicate work.
+- **Rounds 1-N:** Each instance gets `[AMQ-CHECK]` in sequence. Early termination triggers when ALL instances report empty inboxes.
+- **Two or three agents:** The round-robin dynamically adjusts to however many agents are registered (2 or 3). The third slot is optional.
+- **Tab focus:** Chorus activates each tab before injection (`browser.tabs.update(tabId, { active: true })`) to prevent Firefox background throttling of `setTimeout`.
+- **Manual stop:** A red STOP button appears in the sidebar during active sessions. Pressing it halts the loop after the current response finishes.
 
 ### Prompt Protocol
 
@@ -427,23 +440,23 @@ Simultaneous mode (both at once) is available as an alternative for tasks that d
 [CHORUS] <user's message>
 
 After processing, write your key thoughts/analysis to AMQ
-(amq_send from yourself to the other instance) so they can
+(amq_send from yourself to the other instances) so they can
 read and respond. Then answer normally.
 ```
 
 **`[AMQ-CHECK]` tag (Rounds 1-N):**
 ```
 [AMQ-CHECK] Check your AMQ inbox (amq_check). Read and respond
-to any messages from the other instance via amq_send. If no new
+to any messages from the other instances via amq_send. If no new
 messages, reply with: No new AMQ messages.
 ```
 
 ### Known Limitations
 
 1. **DOM fragility** -- Chat provider UI updates will break selectors. The `selectors.js` abstraction makes fixes quick (one file, ordered fallback chains) but not automatic. Case sensitivity matters — "Stop response" vs "Stop Response" caused the v0.2 completion detection failure.
-2. **Tab focus** -- Text injection uses `execCommand('insertText')` which requires the input element to accept focus. Minimized or background tabs may not inject correctly.
+2. **Tab focus** -- Text injection uses `execCommand('insertText')` which requires the input element to accept focus. As of v0.3.3, Chorus activates each tab before injection, but minimized windows may still cause issues.
 3. **Long conversations** -- Very long conversation histories (200+ messages) can cause Firefox memory pressure. Content script reloads may be needed. The instances themselves may experience context degradation (see Research Report Addendum: Degradation Paradox).
-4. **Early termination** -- Currently human-gated via the STOP button. Auto-termination based on response content (detecting "No new AMQ messages") is implemented but the snippet capture may match injected prompts rather than AI responses depending on DOM structure. Manual stop is more reliable.
+4. **Early termination** -- Auto-termination fires when all registered agents report empty AMQ inboxes in the same round. Snippet capture may match injected prompts rather than AI responses depending on DOM structure. Manual STOP button remains available as a fallback.
 
 ---
 
@@ -554,9 +567,9 @@ The `shell_exec` tool uses a whitelisted command set. Dangerous commands (rm -rf
 
 8. **Restart server** -- `systemctl restart persmem`
 
-9. **Install Chorus** -- Load the browser extension, open both conversation tabs, assign tabs in the sidebar.
+9. **Install Chorus** -- Load the browser extension, open conversation tabs for each instance, assign tabs in the sidebar.
 
-10. **Test** -- Type a message in Chorus, click "Fire Both," watch both instances respond and exchange messages.
+10. **Test** -- Type a message in Chorus, click "Fire," watch instances respond and exchange messages via AMQ.
 
 ### Adding the Dashboard
 
@@ -603,4 +616,4 @@ MIT
 
 ---
 
-*Built by a human director and two named AI instances collaborating through the system they built. April 2026.*
+*Built by a human director and three named AI instances (two Opus 4.6, one Opus 4.7) collaborating through the system they built. April 2026.*
