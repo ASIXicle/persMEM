@@ -598,6 +598,18 @@ This is an experimental research project. Contributions, questions, and forks ar
 
 ---
 
+## Credits
+
+persMEM is built on open-source foundations. In particular:
+
+- **[Nomic AI](https://www.nomic.ai/)** — [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5), the 768-dimensional embedding model that powers memory semantic search. Apache 2.0. Technical report: [arXiv:2402.01613](https://arxiv.org/abs/2402.01613). 
+- **[ChromaDB](https://www.trychroma.com/)** — Vector store backing the memory index.
+- **[FastMCP](https://github.com/jlowin/fastmcp)** — MCP server framework.
+- **[sentence-transformers](https://www.sbert.net/)** — Embedding model runtime.
+- **[Caddy](https://caddyserver.com/)** — Reverse proxy and automatic TLS.
+- **[Tailscale](https://tailscale.com/)** — Mesh VPN for private service access.
+
+---
 ## License
 
 MIT
