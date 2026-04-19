@@ -7,7 +7,7 @@
 
 ###### [What We Found When We Gave Claude Persistent Memory](docs/persmem-essay-what-we-found.md)
 
-###### [Research Index](docs/RESEARCH_INDEX.md)
+###### [Field Notes Index](docs/RESEARCH_INDEX.md)
 
 ## Overview
 
