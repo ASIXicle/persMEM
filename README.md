@@ -29,7 +29,7 @@ The system runs on a single low-power Linux container (tested on Intel N97, 4 co
 ```
                     ╔══════════════════════════════════════════╗
                     ║            BROWSER EXTENSION             ║
-                    ║        Chorus v0.4 — Firefox/Chrome      ║
+                    ║        Chorus v0.5 — Firefox/Chrome      ║
                     ║                                          ║
                     ║   Sidebar  ▸  Fire All Tabs              ║
                     ║   Round-robin AMQ exchange loop          ║
@@ -522,14 +522,34 @@ The `shell_exec` tool uses a whitelisted command set. Dangerous commands (rm -rf
 
 ### Data Backup
 
-```bash
-# Automated daily backup (cron)
-0 3 * * * /opt/persmem/scripts/backup-persmem.py
+persMEM ships with a GFS-rotation backup script at [`server/backup-persmem.py`](server/backup-persmem.py). It writes one compressed tarball per day containing the full ChromaDB binary, markdown dumps of every collection (human-readable fallback), any AMQ maildirs you configure, and a SHA256 manifest.
 
-# Backup includes ChromaDB data and AMQ messages
-# Retention: 30 days
-# Location: /var/lib/persmem/backups/
+**Key properties:**
+- **Off-disk destination** -- the script expects `BACKUP_ROOT` to be on different physical storage from ChromaDB (NFS, mirrored ZFS, external drive, etc.). Same-disk backup defeats the purpose.
+- **Consistent snapshot** -- briefly stops the persMEM service so the underlying SQLite files are copied at rest.
+- **GFS retention** -- 14 daily + 8 weekly + 12 monthly by default. At steady state about 34 tarballs (~100 MB).
+- **Compression** -- zstd if installed (`apt install zstd`), gzip fallback.
+- **Integrity** -- per-file sha256 inside each tarball plus outer sha256 appended to `SHA256SUMS` in the backup directory.
+- **Idempotent** -- safe to invoke multiple times per day.
+
+**Setup summary** (full instructions in [`server/backup-persmem-README.md`](server/backup-persmem-README.md)):
+
+```bash
+# 1. Mount your off-disk destination at, e.g., /mnt/backups/persmem
+# 2. Edit the CONFIGURATION block at the top of backup-persmem.py
+#    (CHROMADB_PATH, BACKUP_ROOT, PERSMEM_SERVICE, AMQ_MAILDIRS)
+# 3. Copy into place
+cp server/backup-persmem.py /opt/persmem/scripts/backup-persmem.py
+chmod +x /opt/persmem/scripts/backup-persmem.py
+
+# 4. Test manually
+/opt/persmem/scripts/backup-persmem.py
+
+# 5. Schedule via systemd timer (unit files in the companion README)
+systemctl enable --now persmem-backup.timer
 ```
+
+Restore is either a binary drop-in of the `chromadb/` tree (fast path) or a re-ingest from the markdown dumps (slow path; useful if the binary is corrupted or you're migrating embedding models). See the restore section of the backup README for both procedures.
 
 ---
 
@@ -547,23 +567,25 @@ The `shell_exec` tool uses a whitelisted command set. Dangerous commands (rm -rf
 
 5. **Test** (5 min) -- Ask your assistant to call `memory_store` with a test message, then `memory_search` to retrieve it.
 
+6. **Install backup** (10 min) -- Mount an off-disk destination, configure and deploy `server/backup-persmem.py`, enable the systemd timer. See Data Backup above.
+
 ### Adding Multi-Instance Communication
 
-6. **Create AMQ mailboxes** -- `mkdir -p /home/persmem/amq/{instance-a,instance-b}/inbox/{tmp,new,cur}`
+7. **Create AMQ mailboxes** -- `mkdir -p /home/persmem/amq/{instance-a,instance-b}/inbox/{tmp,new,cur}`
 
-7. **Add AMQ tools to server.py** -- Splice the four AMQ tool functions before the `if __name__` block.
+8. **Add AMQ tools to server.py** -- Splice the four AMQ tool functions before the `if __name__` block.
 
-8. **Restart server** -- `systemctl restart persmem`
+9. **Restart server** -- `systemctl restart persmem`
 
-9. **Install Chorus** -- Load the browser extension, open conversation tabs for each instance, assign tabs in the sidebar.
+10. **Install Chorus** -- Load the browser extension, open conversation tabs for each instance, assign tabs in the sidebar.
 
-10. **Test** -- Type a message in Chorus, click "Fire," watch instances respond and exchange messages via AMQ.
+11. **Test** -- Type a message in Chorus, click "Fire," watch instances respond and exchange messages via AMQ.
 
 ### Adding the Dashboard
 
-11. **Deploy dashboard.py** -- Copy to `/opt/persmem-dashboard/`, download `chart.min.js`, create systemd service.
+12. **Deploy dashboard.py** -- Copy to `/opt/persmem-dashboard/`, download `chart.min.js`, create systemd service.
 
-12. **Access** -- Open `http://<lan-ip>:9090` in a browser. AMQ feed updates every 3 seconds.
+13. **Access** -- Open `http://<lan-ip>:9090` in a browser. AMQ feed updates every 3 seconds.
 
 ---
 
