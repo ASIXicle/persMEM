@@ -1,6 +1,6 @@
 /**
- * sidebar.js — Chorus Sidebar Logic v0.4
- * Three-instance support with dynamic third agent name.
+ * sidebar.js — Chorus Sidebar Logic v0.5.0
+ * Three-instance support with fire-first ordering.
  */
 
 (() => {
@@ -16,6 +16,7 @@
   const inputRounds = document.getElementById("input-rounds");
   const inputCeiling = document.getElementById("input-ceiling");
   const selMode    = document.getElementById("sel-mode");
+  const selFireFirst = document.getElementById("sel-fire-first");
   const btnFire    = document.getElementById("btn-fire");
   const btnStop    = document.getElementById("btn-stop");
   const statusEl   = document.getElementById("status");
@@ -122,6 +123,7 @@
     const ceilingSec = parseInt(inputCeiling.value, 10) || 300;
     const ceilingMs = ceilingSec * 1000;
     const mode = selMode.value || "roundrobin";
+    const fireFirst = selFireFirst.value || "";
 
     firing = true;
     btnFire.disabled = true;
@@ -136,6 +138,7 @@
         rounds: rounds,
         mode: mode,
         ceilingMs: ceilingMs,
+        fireFirst: fireFirst,
       });
 
       if (result.success) {

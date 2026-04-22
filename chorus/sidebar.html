@@ -209,7 +209,7 @@
     <div class="section-title">Exchange Settings</div>
     <div class="settings-row">
       <div>
-        <label>Rounds</label>
+        <label>AMQ Exchanges</label>
         <input type="number" id="input-rounds" value="3" min="0" max="144">
       </div>
       <div>
@@ -222,6 +222,15 @@
       <select id="sel-mode">
         <option value="roundrobin">Round Robin (sequential)</option>
         <option value="simultaneous">Simultaneous (all at once)</option>
+      </select>
+    </div>
+    <div style="margin-top:8px;">
+      <label>Fire First</label>
+      <select id="sel-fire-first">
+        <option value="">Default order</option>
+        <option value="kite">Kite</option>
+        <option value="wren">Wren</option>
+        <option value="__third__">Third instance</option>
       </select>
     </div>
   </div>
@@ -243,7 +252,7 @@
     <div class="round-display" id="round-display"></div>
   </div>
 
-  <div class="footer">Chorus v0.4 — Kite &amp; Wren &amp; ?</div>
+  <div class="footer">Chorus v0.5 — Kite &amp; Wren &amp; ?</div>
 
   <script src="selectors.js"></script>
   <script src="sidebar.js"></script>

@@ -1,6 +1,6 @@
 /**
- * background.js — Chorus Background Script v0.4
- * Three-instance round-robin: Kite → Wren → Third (4.7 sibling).
+ * background.js — Chorus Background Script v0.5.0
+ * Three-instance round-robin with configurable fire-first ordering.
  * Stop-button completion detection, manual stop, follow-up prompts.
  */
 
@@ -14,8 +14,8 @@
   let lastResponses = {};
   let stopRequested = false;
 
-  // Agent order for round-robin. Third slot uses whatever name is registered.
-  function getAgentOrder() {
+  // Agent order for round-robin. fireFirst moves selected agent to front.
+  function getAgentOrder(fireFirst) {
     const order = [];
     if (tabMap["kite"]) order.push("kite");
     if (tabMap["wren"]) order.push("wren");
@@ -23,12 +23,24 @@
     for (const agent of Object.keys(tabMap)) {
       if (agent !== "kite" && agent !== "wren") order.push(agent);
     }
+    // Reorder if fireFirst is set
+    if (fireFirst) {
+      // __third__ resolves to the actual third agent name
+      const resolved = fireFirst === "__third__"
+        ? order.find(a => a !== "kite" && a !== "wren") || ""
+        : fireFirst;
+      const idx = order.indexOf(resolved);
+      if (idx > 0) {
+        order.splice(idx, 1);
+        order.unshift(resolved);
+      }
+    }
     return order;
   }
 
   const AMQ_CHECK_PROMPT =
     "[AMQ-CHECK] Check your AMQ inbox (amq_check). " +
-    "Read and respond to any messages from the other instance via amq_send. " +
+    "Read and respond to any messages from the other instances via amq_send. " +
     "If no new messages, reply with: No new AMQ messages.";
 
   const NO_MSG_PATTERNS = [
@@ -41,7 +53,7 @@
   function wrapInitialPrompt(text) {
     return "[CHORUS] " + text + "\n\n" +
       "After processing, write your key thoughts/analysis to AMQ " +
-      "(amq_send from yourself to the other instance) so they can " +
+      "(amq_send from yourself to the other instances) so they can " +
       "read and respond. Then answer normally.";
   }
 
@@ -181,14 +193,14 @@
 
   // ── Main Loop ──
 
-  async function runLoop(text, maxRounds, mode, ceilingMs) {
+  async function runLoop(text, maxRounds, mode, ceilingMs, fireFirst) {
     const status = [];
     const ceiling = ceilingMs || 300000;
     stopRequested = false;
     await loadTabMap();
 
     const deadTabTimeout = Math.round(ceiling * 1.5);
-    const agents = getAgentOrder();
+    const agents = getAgentOrder(fireFirst);
     const agentCount = agents.length;
 
     if (agentCount === 0) {
@@ -249,7 +261,8 @@
           await waitForAllResponses(deadTabTimeout);
           if (stopRequested) { broadcastStatus("stopped", round, maxRounds); return status; }
 
-          if (!responseIsEmpty(lastResponses[agent])) {
+          const resp = lastResponses[agent];
+          if (resp && resp !== "[TIMEOUT — no response]" && !responseIsEmpty(resp)) {
             allEmpty = false;
           }
         }
@@ -361,8 +374,8 @@
     }
 
     if (msg.type === "chorus:fire") {
-      const { text, rounds, mode, ceilingMs } = msg;
-      runLoop(text, rounds || 3, mode || "roundrobin", ceilingMs || 300000).then((status) => {
+      const { text, rounds, mode, ceilingMs, fireFirst } = msg;
+      runLoop(text, rounds || 3, mode || "roundrobin", ceilingMs || 300000, fireFirst || "").then((status) => {
         sendResponse({ success: true, status });
       }).catch((e) => {
         sendResponse({ success: false, error: e.message });
@@ -396,5 +409,5 @@
     }
   });
 
-  console.log("[Chorus] Background script v0.4 loaded (3-instance round-robin)");
+  console.log("[Chorus] Background script v0.5.0 loaded (3-instance round-robin, fire-first ordering)");
 })();

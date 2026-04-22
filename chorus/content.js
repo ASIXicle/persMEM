@@ -1,5 +1,5 @@
 /**
- * content.js — Chorus Content Script v0.3.1
+ * content.js — Chorus Content Script v0.5.0
  * Stop-button lifecycle as primary completion detection.
  * v0.3.1: Re-check stop button after debounce to catch MCP tool flicker.
  * DOM silence (15s) as fallback. Ceiling as safety net.
@@ -8,8 +8,8 @@
 (() => {
   "use strict";
 
-  if (window.__chorus_loaded === "0.3.1") return;
-  window.__chorus_loaded = "0.3.1";
+  if (window.__chorus_loaded === "0.5.0") return;
+  window.__chorus_loaded = "0.5.0";
 
   // ── State ──
   let responseObserver = null;
@@ -292,5 +292,5 @@
     }
   });
 
-  console.log("[Chorus] Content script v0.3.1 loaded (stop-button recheck on debounce)");
+  console.log("[Chorus] Content script v0.5.0 loaded (stop-button recheck on debounce)");
 })();
