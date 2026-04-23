@@ -119,8 +119,10 @@
       return;
     }
 
-    const rounds = parseInt(inputRounds.value, 10) || 3;
-    const ceilingSec = parseInt(inputCeiling.value, 10) || 300;
+    const _r = parseInt(inputRounds.value, 10);
+    const rounds = Number.isFinite(_r) ? _r : 3;
+    const _c = parseInt(inputCeiling.value, 10);
+    const ceilingSec = Number.isFinite(_c) ? _c : 300;
     const ceilingMs = ceilingSec * 1000;
     const mode = selMode.value || "roundrobin";
     const fireFirst = selFireFirst.value || "";

@@ -375,7 +375,7 @@
 
     if (msg.type === "chorus:fire") {
       const { text, rounds, mode, ceilingMs, fireFirst } = msg;
-      runLoop(text, rounds || 3, mode || "roundrobin", ceilingMs || 300000, fireFirst || "").then((status) => {
+      runLoop(text, rounds ?? 3, mode || "roundrobin", ceilingMs || 300000, fireFirst || "").then((status) => {
         sendResponse({ success: true, status });
       }).catch((e) => {
         sendResponse({ success: false, error: e.message });

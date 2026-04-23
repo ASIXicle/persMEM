@@ -31,7 +31,7 @@ from sentence_transformers import SentenceTransformer
 
 # --- Config ---
 CHROMADB_PATH = "/var/lib/persmem/chromadb"
-EMBEDDING_MODEL = "/opt/persmem/models/nomic-embed-text-v1.5"
+EMBEDDING_MODEL = "/opt/persmem/models/voyage-4-nano"
 AMQ_ROOT = "/home/persmem/amq"
 STRESS_COLLECTION = "stress_test_tmp"
 

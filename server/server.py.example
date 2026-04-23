@@ -18,7 +18,9 @@ ENVIRONMENT VARIABLES:
     PERSMEM_HOST           - Listen host (default: 127.0.0.1)
     PERSMEM_PORT           - Listen port (default: 8000)
     PERSMEM_SECRET_PATH    - URL path slug for MCP endpoint (default: "dev")
-    PERSMEM_EMBEDDING_MODEL - Path to local embedding model
+    PERSMEM_EMBEDDING_MODEL - Path or HuggingFace name for embedding model
+                              (default: "voyageai/voyage-4-nano")
+    PERSMEM_EMBEDDING_DIM   - Truncated embedding dimension (default: 1024)
     PERSMEM_SEARXNG_URL    - SearXNG instance URL for web_search (optional)
     PERSMEM_AMQ_AGENTS     - Comma-separated agent names (default: "agent_a,agent_b")
 """
@@ -44,13 +46,14 @@ DATA_DIR = os.environ.get("PERSMEM_DATA_DIR", "/var/lib/persmem/chromadb")
 HOST = os.environ.get("PERSMEM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PERSMEM_PORT", "8000"))
 SECRET_PATH = os.environ.get("PERSMEM_SECRET_PATH", "dev")
-EMBEDDING_MODEL = os.environ.get("PERSMEM_EMBEDDING_MODEL", "/opt/persmem/models/nomic-embed-text-v1.5")
+EMBEDDING_MODEL = os.environ.get("PERSMEM_EMBEDDING_MODEL", "voyageai/voyage-4-nano")
+EMBEDDING_DIM_TRUNCATE = int(os.environ.get("PERSMEM_EMBEDDING_DIM", "1024"))
 
 # ---------------------------------------------------------------------------
 # Boot: embedding model + ChromaDB
 # ---------------------------------------------------------------------------
 print(f"[persMEM] Loading embedding model: {EMBEDDING_MODEL}")
-embedder = SentenceTransformer(EMBEDDING_MODEL, trust_remote_code=True)
+embedder = SentenceTransformer(EMBEDDING_MODEL, trust_remote_code=True, truncate_dim=EMBEDDING_DIM_TRUNCATE)
 EMBEDDING_DIM = embedder.get_sentence_embedding_dimension()
 print(f"[persMEM] Embedding dim: {EMBEDDING_DIM}")
 
@@ -69,10 +72,9 @@ def get_or_create_collection(name: str):
     )
 
 
-def embed(texts: list[str], prefix: str = "search_document") -> list[list[float]]:
-    """Embed texts with nomic task prefixes (search_document for storage, search_query for retrieval)."""
-    prefixed = [f"{prefix}: {t}" for t in texts]
-    return embedder.encode(prefixed, show_progress_bar=False).tolist()
+def embed(texts: list[str], mode: str = "document") -> list[list[float]]:
+    """Embed texts with Voyage 4 nano prompt names (document for storage, query for retrieval)."""
+    return embedder.encode(texts, prompt_name=mode, show_progress_bar=False).tolist()
 
 
 def make_id(content: str, timestamp: str) -> str:
@@ -176,7 +178,7 @@ def memory_search(
     elif len(conditions) > 1:
         where = {"$and": conditions}
 
-    query_embedding = embed([query], prefix="search_query")
+    query_embedding = embed([query], mode="query")
 
     results = coll.query(
         query_embeddings=query_embedding,

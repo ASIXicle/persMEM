@@ -1,0 +1,48 @@
+# newstron9000 systemd units
+#
+# Copy these to /etc/systemd/system/ and adjust paths as needed.
+# Then: systemctl daemon-reload && systemctl enable --now newstron9000-fetch.timer newstron9000-digest.timer
+
+# ── newstron9000-fetch.service ──
+# [Unit]
+# Description=newstron9000 — fetch RSS/Atom feeds and store via persMEM
+# After=network-online.target persmem.service
+# Wants=network-online.target
+# Requires=persmem.service
+#
+# [Service]
+# Type=oneshot
+# User=newstron9000
+# Group=newstron9000
+# WorkingDirectory=/opt/newstron9000/src
+# ExecStart=/opt/newstron9000/venv/bin/python3 /opt/newstron9000/src/fetcher.py
+# EnvironmentFile=/home/newstron9000/.env
+#
+# # Hardening
+# PrivateTmp=yes
+# ProtectSystem=strict
+# ProtectHome=read-only
+# NoNewPrivileges=yes
+# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# CapabilityBoundingSet=
+# ReadWritePaths=/opt/newstron9000/state /opt/newstron9000/logs
+# TimeoutStartSec=300
+
+# ── newstron9000-fetch.timer ──
+# [Timer]
+# OnCalendar=*-*-* 00,06,12,18:05:00 UTC
+# Persistent=yes
+# RandomizedDelaySec=300
+
+# ── newstron9000-digest.service ──
+# [Service]
+# Type=oneshot
+# User=newstron9000
+# ExecStart=/opt/newstron9000/venv/bin/python3 /opt/newstron9000/src/digest.py
+# ReadWritePaths=/var/lib/persmem-amq /opt/newstron9000/logs
+# TimeoutStartSec=120
+
+# ── newstron9000-digest.timer ──
+# [Timer]
+# OnCalendar=*-*-* 10:00:00 UTC
+# Persistent=yes

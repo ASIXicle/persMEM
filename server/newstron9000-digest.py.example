@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""
+digest.py — Generate the daily newstron9000 digest.
+
+Pulls news items stored in the last 24h (or configurable window), groups
+by tier, writes a Maildir-style message to the shared `news` AMQ mailbox
+at /home/persmem/amq/news/inbox/new/ where Knot/Wren/Kite can read it
+via amq_check + amq_read.
+
+Template-only: no LLM summarization. Boring is honest.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import socket
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+LOG_DIR = Path("/opt/newstron9000/logs")
+AMQ_ROOT = Path("/var/lib/persmem-amq/news/inbox")
+TMP_DIR = AMQ_ROOT / "tmp"
+NEW_DIR = AMQ_ROOT / "new"
+
+# Pull window (items stored in last N hours)
+WINDOW_HOURS = 24
+# How many items per tier in the digest (set high; filter by stored_at only)
+MAX_ITEMS_PER_TIER = 50
+
+TIER_LABELS = {
+    1: "Security & Operational",
+    2: "Infrastructure",
+    3: "Experiment-relevant",
+    4: "Academic",
+}
+
+
+def setup_logging() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_DIR / "digest.log",
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    if sys.stderr.isatty():
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logging.getLogger().addHandler(h)
+
+
+def fetch_tier(client, tier: int, since_iso: str) -> list[dict]:
+    """Pull up to MAX_ITEMS_PER_TIER items from the given tier, filtered by date in Python.
+
+    We don't pass `since` to news_search because ChromaDB's $gte operator is
+    numeric-only and won't match ISO timestamp strings. Safer to filter
+    in-process after the semantic fetch.
+    """
+    # news_search is semantic, so we use a broad query per tier.
+    query_by_tier = {
+        1: "security advisory vulnerability patch release",
+        2: "software release version update",
+        3: "anthropic claude mcp announcement release",
+        4: "research paper agent memory multi-agent",
+    }
+    query = query_by_tier.get(tier, "release update")
+    try:
+        result = client.news_search(
+            query=query,
+            top_k=MAX_ITEMS_PER_TIER,
+            tier=tier,
+        )
+        items = result.get("results", [])
+        # Filter by stored_at >= since_iso in Python
+        filtered = []
+        for item in items:
+            stored = item.get("metadata", {}).get("stored_at", "")
+            if stored and stored >= since_iso:
+                filtered.append(item)
+        return filtered
+    except Exception as e:
+        logging.error(f"news_search failed for tier {tier}: {e}")
+        return []
+
+
+def format_item(item: dict) -> str:
+    """Single item as one markdown block."""
+    content = item.get("content", "").strip()
+    meta = item.get("metadata", {})
+    source = meta.get("source", "?")
+    url = meta.get("url", "")
+    item_date = meta.get("item_date", "")
+    keywords = meta.get("keywords", "")
+
+    # First line of content is title; rest is summary
+    lines = content.split("\n", 1)
+    title = lines[0].strip()
+    summary = lines[1].strip() if len(lines) > 1 else ""
+    # Collapse long summaries to 2 lines for digest readability
+    if summary:
+        sumlines = [l.strip() for l in summary.splitlines() if l.strip()]
+        summary = " ".join(sumlines[:2])
+        if len(summary) > 320:
+            summary = summary[:317] + "…"
+
+    parts = [f"- **{title}** ({source})"]
+    if summary:
+        parts.append(f"  {summary}")
+    footer_bits = []
+    if item_date:
+        footer_bits.append(item_date)
+    if keywords:
+        footer_bits.append(f"kw: {keywords}")
+    if footer_bits:
+        parts.append(f"  _{' · '.join(footer_bits)}_")
+    if url:
+        parts.append(f"  [{url}]({url})")
+    return "\n".join(parts)
+
+
+def build_digest_body(tiers_items: dict[int, list[dict]], since_iso: str, now_iso: str) -> tuple[str, int]:
+    """Return (markdown_body, total_item_count)."""
+    total = sum(len(items) for items in tiers_items.values())
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    lines = []
+    lines.append(f"# News digest: {today}")
+    lines.append("")
+    lines.append(f"Window: items stored since {since_iso}")
+    lines.append(f"Total items: {total}")
+    lines.append("")
+
+    if total == 0:
+        lines.append("No new items in window. Quiet day.")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("*Pull more context anytime via `news_search(query, top_k, tier, since)`.*")
+        return "\n".join(lines), 0
+
+    for tier in (1, 2, 3, 4):
+        items = tiers_items.get(tier, [])
+        if not items:
+            continue
+        lines.append(f"## {TIER_LABELS[tier]} ({len(items)} items)")
+        lines.append("")
+        for item in items:
+            lines.append(format_item(item))
+            lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("*Use `news_search(query, top_k, tier, since)` to pull deeper on any topic.*")
+    lines.append("*Drop a one-line reaction pointer in this mailbox if an item hits code another instance shipped.*")
+    return "\n".join(lines), total
+
+
+def write_amq_message(subject: str, body: str) -> Path:
+    """Maildir-style: write to tmp/, fsync, atomic rename to new/."""
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    NEW_DIR.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%dT%H%M%S-%f")
+    rnd = uuid.uuid4().hex[:8]
+    filename = f"{ts}_news_{rnd}.md"
+
+    # AMQ header frontmatter matches what server.py's amq_* tools expect.
+    # Schema aligns with _amq_msg_id / amq_send / amq_read conventions.
+    msg_id = f"{ts}_news_{rnd}"
+    header = {
+        "schema": 1,
+        "id": msg_id,
+        "from": "news",
+        "to": "broadcast",  # readable by all instances via amq_check
+        "subject": subject,
+        "kind": "digest",
+        "priority": "low",
+        "created": now.isoformat(),
+    }
+    full_body = (
+        f"---json\n"
+        f"{json.dumps(header, indent=2)}\n"
+        f"---\n"
+        f"{body}\n"
+    )
+
+    tmp_path = TMP_DIR / filename
+    new_path = NEW_DIR / filename
+    tmp_path.write_text(full_body)
+    # fsync the file
+    with open(tmp_path, "rb") as f:
+        os.fsync(f.fileno())
+    os.rename(tmp_path, new_path)
+    return new_path
+
+
+def main() -> int:
+    setup_logging()
+    logging.info("=" * 60)
+    logging.info("newstron9000 digest starting")
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=WINDOW_HOURS)
+    since_iso = since.isoformat()
+    now_iso = now.isoformat()
+
+    from mcp_client import MCPClient
+    client = MCPClient()
+
+    tiers_items: dict[int, list[dict]] = {}
+    for tier in (1, 2, 3, 4):
+        tiers_items[tier] = fetch_tier(client, tier, since_iso)
+        logging.info(f"tier {tier}: {len(tiers_items[tier])} items")
+
+    body, count = build_digest_body(tiers_items, since_iso, now_iso)
+    today = now.date().isoformat()
+    subject = f"Daily digest — {today} ({count} items)"
+    path = write_amq_message(subject, body)
+    logging.info(f"digest written: {path}")
+    logging.info(f"digest complete: {count} items total")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

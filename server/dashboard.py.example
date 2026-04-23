@@ -1,54 +1,160 @@
 #!/usr/bin/env python3
 """
-persMEM Dashboard -- Read-only viewer for Claude's memory + live AMQ feed.
-Runs on the persMEM LXC, accessible on LAN only.
+persMEM Dashboard v2.1 — Read-only viewer + AMQ compose for Claude's memory.
+Light-mode only. LAN access on 0.0.0.0:9090.
 
-ENVIRONMENT VARIABLES:
-    PERSMEM_AMQ_AGENTS - Comma-separated agent names (default: "agent_a,agent_b")
-
-Serves on 0.0.0.0:9090 by default.
+v2.1 changes (Wren, April 22 2026):
+  - System status bar (uptime, service health, memory/news/AMQ counts, model name)
+  - AMQ compose box (send messages directly from browser to any agent)
+  - Export buttons (memories JSON/Markdown, news JSON)
+v2.0 changes (Wren, April 22 2026):
+  - Auto-discover AMQ agents from filesystem (supports triad + news)
+  - Knot color theming (gold/amber)
+  - News collection display (newstron9000)
+  - Per-card copy buttons
+  - Server-side minimal markdown rendering (no external deps)
+  - Memory pagination (50 per page)
+  - Stacked activity timeline (memories + AMQ + news per day)
+  - Fixed: Chart.js legend color contrast, cache-control on main route
 """
 
 import os
+import re
 import json
+import html
+import uuid
+import subprocess
 from datetime import datetime, timezone
 from collections import Counter
 
-from flask import Flask, render_template_string, request, jsonify, make_response
+from flask import Flask, render_template_string, request, jsonify, make_response, Response
 import chromadb
 
 # --- Config ---
 CHROMADB_PATH = "/var/lib/persmem/chromadb"
-COLLECTION_NAME = "memories"
 AMQ_ROOT = "/home/persmem/amq"
-AMQ_AGENTS = os.environ.get("PERSMEM_AMQ_AGENTS", "agent_a,agent_b").split(",")
 HOST = "0.0.0.0"
 PORT = 9090
+PAGE_SIZE = 50
 
 app = Flask(__name__, static_folder="/opt/persmem-dashboard", static_url_path="/static")
 
 
-def get_collection():
-    client = chromadb.PersistentClient(path=CHROMADB_PATH)
-    return client.get_collection(COLLECTION_NAME)
+# --- Auto-discover AMQ agents ---
+def discover_agents():
+    agents = []
+    try:
+        for name in sorted(os.listdir(AMQ_ROOT)):
+            inbox = os.path.join(AMQ_ROOT, name, "inbox")
+            if os.path.isdir(inbox):
+                agents.append(name)
+    except OSError:
+        pass
+    return agents or ["kite", "wren"]
 
 
-def get_all_memories():
-    col = get_collection()
-    total = col.count()
-    if total == 0:
+# --- ChromaDB helpers ---
+def get_client():
+    return chromadb.PersistentClient(path=CHROMADB_PATH)
+
+
+def get_all_from_collection(name):
+    try:
+        client = get_client()
+        col = client.get_collection(name)
+        total = col.count()
+        if total == 0:
+            return []
+        results = col.get(include=["documents", "metadatas"])
+        items = []
+        for i, (doc, meta) in enumerate(zip(results["documents"], results["metadatas"])):
+            items.append({"id": results["ids"][i], "content": doc, **(meta or {})})
+        return items
+    except Exception:
         return []
-    results = col.get(include=["documents", "metadatas"])
-    memories = []
-    for doc, meta in zip(results["documents"], results["metadatas"]):
-        memories.append({"id": results["ids"][len(memories)], "content": doc, **meta})
-    return memories
 
 
+def list_collections():
+    try:
+        client = get_client()
+        return [(c.name, c.count()) for c in client.list_collections()]
+    except Exception:
+        return []
+
+
+# --- Minimal Markdown renderer (no external deps) ---
+def mini_markdown(text):
+    """Convert common markdown patterns to HTML. Covers ~95% of our content."""
+    if not text:
+        return ""
+    t = html.escape(text)
+
+    # Code blocks (``` ... ```)
+    def code_block(m):
+        code = m.group(2)
+        lang = m.group(1) or ""
+        return f'<pre><code class="lang-{lang}">{code}</code></pre>'
+    t = re.sub(r'```(\w*)\n(.*?)```', code_block, t, flags=re.DOTALL)
+
+    # Inline code
+    t = re.sub(r'`([^`]+)`', r'<code>\1</code>', t)
+
+    # Headers (after code blocks so # inside code isn't matched)
+    t = re.sub(r'^#### (.+)$', r'<h5>\1</h5>', t, flags=re.MULTILINE)
+    t = re.sub(r'^### (.+)$', r'<h4>\1</h4>', t, flags=re.MULTILINE)
+    t = re.sub(r'^## (.+)$', r'<h4>\1</h4>', t, flags=re.MULTILINE)
+    t = re.sub(r'^# (.+)$', r'<h3>\1</h3>', t, flags=re.MULTILINE)
+
+    # Bold and italic
+    t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
+    t = re.sub(r'\*(.+?)\*', r'<em>\1</em>', t)
+
+    # Bullet lists (simple, non-nested)
+    def bullet_list(m):
+        items = m.group(0).strip().split('\n')
+        lis = ''.join(f'<li>{re.sub(r"^- ", "", li)}</li>' for li in items if li.strip())
+        return f'<ul>{lis}</ul>'
+    t = re.sub(r'(?:^- .+\n?)+', bullet_list, t, flags=re.MULTILINE)
+
+    # Numbered lists
+    def num_list(m):
+        items = m.group(0).strip().split('\n')
+        lis = ''.join(f'<li>{re.sub(r"^[0-9]+[.)] ", "", li)}</li>' for li in items if li.strip())
+        return f'<ol>{lis}</ol>'
+    t = re.sub(r'(?:^[0-9]+[.)] .+\n?)+', num_list, t, flags=re.MULTILINE)
+
+    # Line breaks (but not inside block elements)
+    t = re.sub(r'\n', '<br>\n', t)
+    # Clean up extra <br> after block elements
+    t = re.sub(r'(</(?:pre|ul|ol|h[3-5]|li)>)<br>', r'\1', t)
+    t = re.sub(r'<br>\n(<(?:pre|ul|ol|h[3-5]))', r'\n\1', t)
+
+    return t
+
+
+def strip_html(text):
+    """Strip HTML tags from RSS/feed content to clean readable text."""
+    if not text:
+        return ""
+    # Replace <br>, <br/>, <p> with newlines
+    t = re.sub(r'<br\s*/?>|</p>', '\n', text)
+    # Replace <li> with bullet points
+    t = re.sub(r'<li[^>]*>', '• ', t)
+    # Strip all remaining tags
+    t = re.sub(r'<[^>]+>', '', t)
+    # Decode common HTML entities
+    t = html.unescape(t)
+    # Clean up excessive whitespace
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    t = re.sub(r' {2,}', ' ', t)
+    return t.strip()
+
+
+# --- AMQ reader ---
 def get_amq_messages():
-    """Read all AMQ messages from both agents' inboxes (new + cur)."""
     messages = []
-    for agent in AMQ_AGENTS:
+    agents = discover_agents()
+    for agent in agents:
         for subdir in ["new", "cur"]:
             dirpath = os.path.join(AMQ_ROOT, agent, "inbox", subdir)
             try:
@@ -70,6 +176,7 @@ def get_amq_messages():
                         continue
                     headers = json.loads(rest[0])
                     headers["body"] = rest[1].strip()
+                    headers["body_html"] = mini_markdown(rest[1].strip())
                     headers["status"] = "unread" if subdir == "new" else "read"
                     headers["recipient"] = agent
                     messages.append(headers)
@@ -79,16 +186,31 @@ def get_amq_messages():
     return messages
 
 
-# NOTE: The dashboard HTML template uses CSS variables and class names
-# based on agent names (e.g., --agent_a-color, .from-agent_a).
-# If you change agent names, update the CSS variables and JS references
-# in the DASHBOARD_HTML template below to match.
-#
-# The template is large (~460 lines of inline HTML/CSS/JS).
-# Key customization points:
-#   - CSS :root variables for agent colors (lines ~101-106)
-#   - AMQ feed rendering in renderAmqFeed() JS function
-#   - Timezone constant TZ (default: America/Chicago)
+# --- Activity data for stacked timeline ---
+def get_activity_data(memories, news_items, amq_messages):
+    """Build per-day counts for memories, news, and AMQ messages."""
+    days = {}
+    for m in memories:
+        day = m.get("stored_at", "")[:10]
+        if day:
+            days.setdefault(day, {"memories": 0, "news": 0, "amq": 0})
+            days[day]["memories"] += 1
+    for n in news_items:
+        day = n.get("stored_at", "")[:10]
+        if day:
+            days.setdefault(day, {"memories": 0, "news": 0, "amq": 0})
+            days[day]["news"] += 1
+    for a in amq_messages:
+        day = a.get("created", "")[:10]
+        if day:
+            days.setdefault(day, {"memories": 0, "news": 0, "amq": 0})
+            days[day]["amq"] += 1
+    return dict(sorted(days.items()))
+
+
+# ============================
+# HTML TEMPLATE
+# ============================
 
 DASHBOARD_HTML = r"""
 <!DOCTYPE html>
@@ -100,208 +222,977 @@ DASHBOARD_HTML = r"""
 <script src="/static/chart.min.js"></script>
 <style>
   :root {
-    --bg: #ffffff; --surface: #f6f8fa; --surface2: #eef1f5;
-    --border: #d1d9e0; --text: #1f2328; --text-dim: #656d76;
-    --accent: #58a6ff; --accent2: #bc8cff; --accent3: #7ee787;
-    --accent4: #ffa657; --accent5: #ff7b72; --accent6: #79c0ff;
-    /* Agent colors — customize per your agent names */
-    --agent_a-color: #58a6ff;
-    --agent_a-bg: rgba(88, 166, 255, 0.08);
-    --agent_a-border: rgba(88, 166, 255, 0.25);
-    --agent_b-color: #bc8cff;
-    --agent_b-bg: rgba(188, 140, 255, 0.08);
-    --agent_b-border: rgba(188, 140, 255, 0.25);
+    --bg: #dfe9de;
+    --surface: #f6f8fa;
+    --surface2: #eef1f5;
+    --border: #d1d9e0;
+    --text: #1f2328;
+    --text-dim: #656d76;
+    --accent: #58a6ff;
+    --accent2: #bc8cff;
+    --accent3: #7ee787;
+    --accent4: #ffa657;
+    --accent5: #ff7b72;
+    --accent6: #79c0ff;
+    --kite-color: #2d7dd2;
+    --kite-bg: rgba(45, 125, 210, 0.07);
+    --kite-border: rgba(45, 125, 210, 0.25);
+    --wren-color: #9b59b6;
+    --wren-bg: rgba(155, 89, 182, 0.07);
+    --wren-border: rgba(155, 89, 182, 0.25);
+    --knot-color: #d4920b;
+    --knot-bg: rgba(212, 146, 11, 0.07);
+    --knot-border: rgba(212, 146, 11, 0.25);
+    --news-color: #27ae60;
+    --news-bg: rgba(39, 174, 96, 0.07);
+    --news-border: rgba(39, 174, 96, 0.25);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.5; padding: 24px; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    line-height: 1.5; padding: 24px;
+  }
   h1 { font-size: 28px; font-weight: 600; margin-bottom: 4px; }
   .subtitle { color: var(--text-dim); font-size: 14px; margin-bottom: 24px; }
-  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; text-align: center; }
-  .stat-card .number { font-size: 36px; font-weight: 700; color: var(--accent); }
-  .stat-card .label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-  .charts-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
-  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .chart-wrap { position: relative; max-width: 280px; margin: 0 auto; }
-  .amq-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; }
-  .amq-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .amq-header h3 { font-size: 14px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .amq-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #7ee787; display: inline-block; margin-right: 6px; animation: pulse 2s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* Stat cards */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; text-align: center;
+  }
+  .stat-card .number { font-size: 32px; font-weight: 700; color: var(--accent); }
+  .stat-card .label {
+    font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px;
+  }
+
+  /* Panels */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; margin-bottom: 24px;
+  }
+  .panel-header {
+    display: flex; align-items: center;
+    justify-content: space-between; margin-bottom: 16px;
+  }
+  .panel-header h3 {
+    font-size: 14px; font-weight: 600; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+
+  /* AMQ */
+  .amq-live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #7ee787; display: inline-block; margin-right: 6px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
   .amq-status { font-size: 12px; color: var(--text-dim); }
-  .amq-feed { max-height: 600px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
-  .amq-msg { padding: 12px 16px; border-radius: 8px; border: 1px solid; cursor: pointer; transition: border-color 0.15s; }
+  .amq-feed { max-height: 600px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .amq-msg {
+    padding: 12px 16px; border-radius: 8px; border: 1px solid;
+    cursor: pointer; transition: border-color 0.15s; position: relative;
+  }
   .amq-msg:hover { filter: brightness(0.97); }
   .amq-msg.expanded .amq-body { display: block; }
-  .amq-msg.from-agent_a { background: var(--agent_a-bg); border-color: var(--agent_a-border); }
-  .amq-msg.from-agent_b { background: var(--agent_b-bg); border-color: var(--agent_b-border); }
+  .amq-msg.from-kite { background: var(--kite-bg); border-color: var(--kite-border); }
+  .amq-msg.from-wren { background: var(--wren-bg); border-color: var(--wren-border); }
+  .amq-msg.from-knot { background: var(--knot-bg); border-color: var(--knot-border); }
+  .amq-msg.from-news { background: var(--news-bg); border-color: var(--news-border); }
   .amq-msg.unread { border-width: 2px; }
-  .amq-msg-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .amq-msg-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-right: 50px; }
   .amq-sender { font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .amq-sender.agent_a { color: var(--agent_a-color); }
-  .amq-sender.agent_b { color: var(--agent_b-color); }
+  .amq-sender.kite { color: var(--kite-color); }
+  .amq-sender.wren { color: var(--wren-color); }
+  .amq-sender.knot { color: var(--knot-color); }
   .amq-arrow { font-size: 12px; color: var(--text-dim); }
   .amq-recipient { font-size: 12px; color: var(--text-dim); font-weight: 600; }
   .amq-subject { font-size: 13px; color: var(--text); flex: 1; }
   .amq-time { font-size: 11px; color: var(--text-dim); margin-left: auto; white-space: nowrap; }
-  .amq-kind { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: rgba(255,255,255,0.5); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
-  .amq-unread-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--accent5); color: white; font-weight: 600; }
-  .amq-body { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
-  .amq-empty { text-align: center; padding: 40px; color: var(--text-dim); font-style: italic; }
-  .amq-count-row { display: flex; gap: 16px; margin-bottom: 12px; }
+  .amq-kind {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px;
+    background: rgba(0,0,0,0.06); color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .amq-unread-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px;
+    background: var(--accent5); color: white; font-weight: 600;
+  }
+  .amq-body {
+    display: none; margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--border); font-size: 13px;
+    color: var(--text); word-break: break-word; line-height: 1.6;
+  }
+  .amq-body h3, .amq-body h4, .amq-body h5 { margin: 10px 0 6px; }
+  .amq-body pre { background: #f0f2f5; padding: 8px 12px; border-radius: 4px; overflow-x: auto; margin: 6px 0; font-size: 12px; }
+  .amq-body code { background: #f0f2f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  .amq-body pre code { background: none; padding: 0; }
+  .amq-body ul, .amq-body ol { margin: 6px 0 6px 20px; }
+  .amq-body li { margin: 2px 0; }
+  .amq-count-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .amq-count-badge { font-size: 12px; padding: 4px 12px; border-radius: 12px; font-weight: 600; }
-  .amq-count-badge.agent_a { background: var(--agent_a-bg); color: var(--agent_a-color); border: 1px solid var(--agent_a-border); }
-  .amq-count-badge.agent_b { background: var(--agent_b-bg); color: var(--agent_b-color); border: 1px solid var(--agent_b-border); }
-  .search-bar { display: flex; gap: 8px; margin-bottom: 24px; }
-  .search-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; }
+  .amq-count-badge.kite { background: var(--kite-bg); color: var(--kite-color); border: 1px solid var(--kite-border); }
+  .amq-count-badge.wren { background: var(--wren-bg); color: var(--wren-color); border: 1px solid var(--wren-border); }
+  .amq-count-badge.knot { background: var(--knot-bg); color: var(--knot-color); border: 1px solid var(--knot-border); }
+  .amq-empty { text-align: center; padding: 40px; color: var(--text-dim); font-style: italic; }
+
+  /* Copy button */
+  .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(0,0,0,0.06); border: none; border-radius: 4px;
+    padding: 3px 8px; font-size: 11px; color: var(--text-dim);
+    cursor: pointer; opacity: 0; transition: opacity 0.15s;
+  }
+  .amq-msg:hover .copy-btn, .memory-card:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { background: rgba(0,0,0,0.12); }
+  .copy-btn.copied { color: var(--accent3); }
+
+  /* Charts */
+  .charts-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px; margin-bottom: 24px;
+  }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px;
+  }
+  .chart-card h3 {
+    font-size: 14px; font-weight: 600; margin-bottom: 16px;
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .chart-wrap { position: relative; max-width: 280px; margin: 0 auto; }
+
+  /* Tabs */
+  .tab-row { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab-btn {
+    padding: 6px 16px; border: 1px solid var(--border); border-radius: 6px 6px 0 0;
+    background: var(--surface2); color: var(--text-dim); font-size: 13px;
+    cursor: pointer; font-weight: 600; border-bottom: none;
+  }
+  .tab-btn.active { background: var(--surface); color: var(--accent); border-color: var(--accent); }
+
+  /* Memory browser */
+  .search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+  .search-bar input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none;
+  }
   .search-bar input:focus { border-color: var(--accent); }
-  .search-bar input::placeholder { color: var(--text-dim); }
-  .filter-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .filter-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 4px 14px; color: var(--text-dim); font-size: 13px; cursor: pointer; transition: all 0.15s; }
-  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--accent); background: var(--surface2); }
-  .memory-list { display: flex; flex-direction: column; gap: 12px; }
-  .memory-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; cursor: pointer; transition: border-color 0.15s; }
+  .filter-row { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .filter-btn {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 16px; padding: 4px 12px; color: var(--text-dim);
+    font-size: 12px; cursor: pointer; transition: all 0.15s;
+  }
+  .filter-btn:hover, .filter-btn.active {
+    border-color: var(--accent); color: var(--accent); background: var(--surface2);
+  }
+  .memory-list { display: flex; flex-direction: column; gap: 10px; }
+  .memory-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; cursor: pointer;
+    transition: border-color 0.15s; position: relative;
+  }
   .memory-card:hover { border-color: var(--accent); }
   .memory-card.expanded .memory-content { display: block; }
-  .memory-meta { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
-  .badge-project { background: rgba(188, 140, 255, 0.15); color: var(--accent2); }
-  .badge-type { background: rgba(126, 231, 135, 0.15); color: var(--accent3); }
-  .badge-tag { background: rgba(255, 166, 87, 0.12); color: var(--accent4); font-weight: 400; }
+  .memory-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; padding-right: 50px; }
+  .badge {
+    font-size: 10px; padding: 2px 8px; border-radius: 12px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .badge-project { background: rgba(155, 89, 182, 0.12); color: var(--wren-color); }
+  .badge-type { background: rgba(126, 231, 135, 0.15); color: #2ea043; }
+  .badge-tag { background: rgba(255, 166, 87, 0.12); color: #bf6a16; font-weight: 400; }
   .memory-date { font-size: 11px; color: var(--text-dim); margin-left: auto; }
-  .memory-preview { font-size: 14px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .memory-content { display: none; font-size: 14px; color: var(--text); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
-  .memory-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.5; margin-top: 8px; }
-  .timeline-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
-  .timeline-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .timeline-bar { display: flex; align-items: end; gap: 4px; height: 100px; padding-top: 8px; }
-  .timeline-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .timeline-col .bar { width: 100%; max-width: 40px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.3s; }
-  .timeline-col .bar-label { font-size: 10px; color: var(--text-dim); writing-mode: vertical-rl; text-orientation: mixed; max-height: 60px; overflow: hidden; }
-  .timeline-col .bar-count { font-size: 11px; color: var(--text-dim); }
+  .memory-preview {
+    font-size: 13px; color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .memory-content {
+    display: none; font-size: 13px; color: var(--text);
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+    word-break: break-word; line-height: 1.6;
+  }
+  .memory-content h3, .memory-content h4, .memory-content h5 { margin: 8px 0 4px; }
+  .memory-content pre { background: #f0f2f5; padding: 8px 12px; border-radius: 4px; overflow-x: auto; margin: 4px 0; font-size: 12px; }
+  .memory-content code { background: #f0f2f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  .memory-content pre code { background: none; padding: 0; }
+  .memory-content ul, .memory-content ol { margin: 4px 0 4px 20px; }
+  .memory-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.5; margin-top: 6px; }
+
+  /* Pagination */
+  .pagination { display: flex; align-items: center; gap: 12px; margin-top: 16px; justify-content: center; }
+  .pagination button {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 14px; color: var(--text); font-size: 13px; cursor: pointer;
+  }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagination .page-info { font-size: 13px; color: var(--text-dim); }
+
+  /* Activity timeline */
+  .timeline-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; margin-bottom: 24px;
+  }
+  .timeline-card h3 {
+    font-size: 14px; font-weight: 600; margin-bottom: 16px;
+    color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+  }
+
   .section-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; margin-top: 8px; }
-  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
-  @media (max-width: 768px) { body { padding: 12px; } .stats-row { grid-template-columns: repeat(2, 1fr); } .charts-row { grid-template-columns: 1fr; } }
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--text-dim); }
+
+  /* System status bar */
+  .status-bar {
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px; margin-bottom: 16px; font-size: 12px;
+  }
+  .status-item { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.green { background: #2ea043; }
+  .status-dot.red { background: #e74c3c; }
+
+  /* AMQ compose box */
+  .compose-box { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .compose-box summary {
+    font-size: 12px; color: var(--text-dim); cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  }
+  .compose-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .compose-row select, .compose-row input {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px;
+    font-size: 12px; background: var(--bg); color: var(--text);
+  }
+  .compose-row select { min-width: 90px; }
+  .compose-row input { flex: 1; min-width: 150px; }
+  .compose-body {
+    width: 100%; margin-top: 8px; padding: 8px; border: 1px solid var(--border);
+    border-radius: 4px; font-size: 12px; font-family: inherit; resize: vertical;
+    min-height: 80px; background: var(--bg); color: var(--text);
+  }
+  .compose-send {
+    margin-top: 8px; padding: 6px 16px; background: #2d7dd2; color: white;
+    border: none; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: 600;
+  }
+  .compose-send:hover { background: #2569b0; }
+  .compose-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .compose-feedback { font-size: 11px; margin-top: 6px; }
+
+  /* Export buttons */
+  .export-row { display: flex; gap: 8px; margin-bottom: 16px; }
+  .export-btn {
+    padding: 5px 14px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer;
+    text-decoration: none; font-weight: 600;
+  }
+  .export-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ECG sweep animation — faint hospital monitor style */
+  .ecg-sweep {
+    position: absolute; top: 0; left: -20%; width: 20%; height: 100%;
+    background: linear-gradient(90deg, transparent 0%, rgba(46,164,67,0.04) 40%, rgba(46,164,67,0.09) 50%, rgba(46,164,67,0.04) 60%, transparent 100%);
+    animation: ecg-scan 6s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes ecg-scan {
+    0% { left: -20%; }
+    100% { left: 100%; }
+  }
+
+  @media (max-width: 768px) {
+    body { padding: 12px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .charts-row { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
+
 <h1>persMEM</h1>
-<p class="subtitle">Claude's Persistent Memory -- {{ total }} memories stored</p>
-<div class="stats-row">
-  <div class="stat-card"><div class="number">{{ total }}</div><div class="label">Total Memories</div></div>
-  <div class="stat-card"><div class="number">{{ projects | length }}</div><div class="label">Projects</div></div>
-  <div class="stat-card"><div class="number">{{ types | length }}</div><div class="label">Memory Types</div></div>
-  <div class="stat-card"><div class="number">{{ unique_tags }}</div><div class="label">Unique Tags</div></div>
-  <div class="stat-card"><div class="number">{{ "%.1f"|format(avg_chars) }}</div><div class="label">Avg Characters</div></div>
-  <div class="stat-card"><div class="number">{{ oldest_day }}</div><div class="label">First Memory</div></div>
+
+<!-- Mission Control -->
+<div class="panel" style="padding:16px 20px; margin-bottom:20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+    <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+      <div class="status-item"><span class="status-dot green" id="dotPersmem"></span> <strong>persMEM</strong></div>
+      <div class="status-item"><span class="status-dot green"></span> Dashboard</div>
+    </div>
+    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; font-size:12px; color:var(--text-dim);">
+      <span id="statusModel" style="font-weight:600; color:var(--accent);">voyage-4-nano</span>
+      <span id="statusUptime">Uptime: --</span>
+    </div>
+  </div>
+  <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
+    <span class="badge badge-project" style="font-size:12px; padding:4px 12px;">{{ total_memories }} memories</span>
+    <span class="badge badge-type" style="font-size:12px; padding:4px 12px;">{{ total_news }} news</span>
+    <span class="badge" style="font-size:12px; padding:4px 12px; background:rgba(45,125,210,0.12); color:var(--kite-color);">{{ total_amq }} AMQ</span>
+    <span class="badge" style="font-size:12px; padding:4px 12px; background:rgba(212,146,11,0.12); color:var(--knot-color);">{{ projects | length }} projects</span>
+    <span class="badge badge-tag" style="font-size:12px; padding:4px 12px;">{{ agents | length }} agents</span>
+  </div>
+  <div style="height:60px; position:relative; overflow:hidden;">
+    <canvas id="sparkline"></canvas>
+    <div class="ecg-sweep"></div>
+  </div>
+  <div style="display:flex; gap:12px; justify-content:center; margin-top:6px; font-size:10px; color:var(--text-dim);">
+    <span style="color:#9b59b6;">&#9679; memories</span>
+    <span style="color:#2d7dd2;">&#9679; AMQ</span>
+    <span style="color:#27ae60;">&#9679; news</span>
+    <span style="color:rgba(46,164,67,0.35);">&#9644; heartbeat</span>
+  </div>
 </div>
-<div class="amq-panel">
-  <div class="amq-header"><h3><span class="amq-live-dot"></span> AMQ Live Feed</h3><span class="amq-status" id="amqStatus">Connecting...</span></div>
+
+<!-- AMQ Live Feed -->
+<div class="panel">
+  <div class="panel-header">
+    <h3><span class="amq-live-dot"></span> AMQ Live Feed</h3>
+    <span class="amq-status" id="amqStatus">Loading...</span>
+  </div>
   <div class="amq-count-row" id="amqCounts"></div>
-  <div class="amq-feed" id="amqFeed"><div class="amq-empty">Loading messages...</div></div>
+  <div class="amq-feed" id="amqFeed"><div class="amq-empty">Loading...</div></div>
+  <!-- AMQ Compose Box -->
+  <div class="compose-box">
+    <details>
+      <summary>Compose AMQ Message</summary>
+      <div class="compose-row">
+        <select id="composeFrom"><option value="holden">holden</option></select>
+        <span style="color:var(--text-dim);font-size:12px;line-height:30px;">&rarr;</span>
+        <select id="composeTo">
+          {% for a in agents %}<option value="{{ a }}">{{ a }}</option>{% endfor %}
+        </select>
+        <input type="text" id="composeSubject" placeholder="Subject...">
+      </div>
+      <textarea class="compose-body" id="composeBody" placeholder="Message body (Markdown)..."></textarea>
+      <button class="compose-send" id="composeSend" onclick="sendAmq()">Send</button>
+      <div class="compose-feedback" id="composeFeedback"></div>
+    </details>
+  </div>
 </div>
+
+<!-- Stacked Activity Timeline -->
+<div class="timeline-card">
+  <h3>Triad Activity (Memories + AMQ + News per day)</h3>
+  <div style="max-height:220px;"><canvas id="activityChart"></canvas></div>
+</div>
+
+<!-- Charts Row -->
 <div class="charts-row">
   <div class="chart-card"><h3>By Project</h3><div class="chart-wrap"><canvas id="projectChart"></canvas></div></div>
   <div class="chart-card"><h3>By Type</h3><div class="chart-wrap"><canvas id="typeChart"></canvas></div></div>
   <div class="chart-card"><h3>By Top Tags</h3><div class="chart-wrap"><canvas id="tagChart"></canvas></div></div>
 </div>
-<div class="timeline-card" style="margin-bottom: 24px;"><h3>Storage Timeline (by day)</h3><div class="timeline-bar" id="timeline"></div></div>
-<h2 class="section-title">Memory Index</h2>
-<div class="search-bar"><input type="text" id="searchInput" placeholder="Filter memories..." oninput="filterMemories()"></div>
+
+<!-- Collection Tabs + Browser -->
+<h2 class="section-title">Index</h2>
+<div class="tab-row">
+  <button class="tab-btn active" onclick="switchTab('memories')">Memories ({{ total_memories }})</button>
+  <button class="tab-btn" onclick="switchTab('news')">News ({{ total_news }})</button>
+</div>
+<div class="export-row">
+  <a class="export-btn" href="/api/export/memories.json" download="persmem-memories.json">Export JSON</a>
+  <a class="export-btn" href="/api/export/memories.md" download="persmem-memories.md">Export Markdown</a>
+  <a class="export-btn" href="/api/export/news.json" download="persmem-news.json">Export News JSON</a>
+</div>
+<div class="search-bar">
+  <input type="text" id="searchInput" placeholder="Filter..." oninput="renderPage()">
+</div>
 <div class="filter-row" id="filterRow"></div>
 <div class="memory-list" id="memoryList"></div>
+<div class="pagination" id="pagination"></div>
+
 <script>
 const MEMORIES = {{ memories_json | safe }};
-const COLORS = ['#58a6ff','#bc8cff','#7ee787','#ffa657','#ff7b72','#79c0ff','#d2a8ff','#ffc680','#a5d6ff','#f0883e'];
-const TZ = 'America/Chicago';  // Change to your timezone
-function donut(id, labels, data) { new Chart(document.getElementById(id), { type: 'doughnut', data: { labels: labels, datasets: [{ data: data, backgroundColor: COLORS.slice(0, labels.length), borderColor: "#f6f8fa", borderWidth: 2 }] }, options: { cutout: '60%', plugins: { legend: { position: 'bottom', labels: { color: '#8b949e', font: { size: 11 }, padding: 12, usePointStyle: true, pointStyleWidth: 8 } } }, responsive: true, maintainAspectRatio: true } }); }
+const NEWS = {{ news_json | safe }};
+const COLORS = ['#2d7dd2','#9b59b6','#27ae60','#d4920b','#e74c3c','#3498db','#e67e22','#1abc9c','#95a5a6','#8e44ad'];
+const TZ = 'America/Chicago';
+const PAGE_SIZE = {{ page_size }};
+let currentTab = 'memories';
+let currentPage = 0;
+let activeFilters = { project: null, type: null };
+
+// --- Donut charts ---
+function donut(id, labels, data) {
+  new Chart(document.getElementById(id), {
+    type: 'doughnut',
+    data: {
+      labels: labels,
+      datasets: [{ data: data, backgroundColor: COLORS.slice(0, labels.length), borderColor: '#f6f8fa', borderWidth: 2 }]
+    },
+    options: {
+      cutout: '60%',
+      plugins: { legend: { position: 'bottom', labels: { color: '#656d76', font: { size: 11 }, padding: 10, usePointStyle: true, pointStyleWidth: 8 } } },
+      responsive: true, maintainAspectRatio: true
+    }
+  });
+}
 const projects = {{ projects_json | safe }};
 const types = {{ types_json | safe }};
 const tags = {{ tags_json | safe }};
 donut('projectChart', Object.keys(projects), Object.values(projects));
 donut('typeChart', Object.keys(types), Object.values(types));
-donut('tagChart', Object.keys(tags).slice(0, 10), Object.values(tags).slice(0, 10));
-const timeline = {{ timeline_json | safe }};
-const timelineEl = document.getElementById('timeline');
-const maxCount = Math.max(...Object.values(timeline), 1);
-Object.entries(timeline).forEach(([day, count]) => { const col = document.createElement('div'); col.className = 'timeline-col'; const pct = (count / maxCount) * 80; col.innerHTML = '<div class="bar-count">' + count + '</div><div class="bar" style="height: ' + Math.max(pct, 4) + 'px"></div><div class="bar-label">' + day + '</div>'; timelineEl.appendChild(col); });
-let lastAmqCount = 0; let amqAutoScroll = true; let expandedIds = new Set();
-function formatTime(isoStr) { if (!isoStr) return ''; return new Date(isoStr).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: TZ}); }
-function formatDate(isoStr) { if (!isoStr) return ''; const d = new Date(isoStr); const today = new Date().toLocaleDateString('en-US', {timeZone: TZ}); const msgDay = d.toLocaleDateString('en-US', {timeZone: TZ}); if (msgDay === today) return formatTime(isoStr); return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: TZ}) + ' ' + formatTime(isoStr); }
-function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-function toggleAmqMsg(el, id) { var sel = window.getSelection(); if (sel && sel.toString().length > 0) return; if (expandedIds.has(id)) { expandedIds.delete(id); el.classList.remove('expanded'); } else { expandedIds.add(id); el.classList.add('expanded'); } }
-function renderAmqFeed(messages) { const feed = document.getElementById('amqFeed'); const counts = document.getElementById('amqCounts'); const status = document.getElementById('amqStatus'); if (messages.length === 0) { feed.innerHTML = '<div class="amq-empty">No messages yet.</div>'; counts.innerHTML = ''; status.textContent = 'No messages'; return; } const aCount = messages.filter(m => m.from === 'agent_a').length; const bCount = messages.filter(m => m.from === 'agent_b').length; const unreadCount = messages.filter(m => m.status === 'unread').length; counts.innerHTML = '<span class="amq-count-badge agent_a">Agent A: ' + aCount + '</span>' + '<span class="amq-count-badge agent_b">Agent B: ' + bCount + '</span>' + (unreadCount > 0 ? '<span class="amq-count-badge" style="background:rgba(255,123,114,0.15);color:var(--accent5);border:1px solid rgba(255,123,114,0.3);">' + unreadCount + ' unread</span>' : ''); status.textContent = messages.length + ' messages -- live'; feed.innerHTML = messages.map(function(m) { var from = m.from || 'unknown'; var to = m.to || 'unknown'; var fromClass = from === 'agent_a' ? 'from-agent_a' : 'from-agent_b'; var unreadClass = m.status === 'unread' ? ' unread' : ''; var subject = m.subject || ''; var kind = m.kind || ''; var body = m.body || ''; var time = formatDate(m.created); var msgId = m.id || ''; var expandClass = expandedIds.has(msgId) ? ' expanded' : ''; return '<div class="amq-msg ' + fromClass + unreadClass + expandClass + '" data-msg-id="' + escapeHtml(msgId) + '" onclick="toggleAmqMsg(this, \'' + escapeHtml(msgId) + '\')">' + '<div class="amq-msg-header">' + '<span class="amq-sender ' + from + '">' + from + '</span>' + '<span class="amq-arrow">&rarr;</span>' + '<span class="amq-recipient">' + to + '</span>' + (kind ? '<span class="amq-kind">' + kind + '</span>' : '') + (m.status === 'unread' ? '<span class="amq-unread-badge">NEW</span>' : '') + '<span class="amq-time">' + time + '</span>' + '</div>' + (subject ? '<div class="amq-subject">' + escapeHtml(subject) + '</div>' : '') + '<div class="amq-body">' + escapeHtml(body) + '</div>' + '</div>'; }).join(''); if (messages.length > lastAmqCount && amqAutoScroll) { feed.scrollTop = 0; } lastAmqCount = messages.length; }
-async function pollAmq() { try { const resp = await fetch('/api/amq?_t=' + Date.now(), { cache: 'no-store' }); const data = await resp.json(); renderAmqFeed(data); } catch (e) { document.getElementById('amqStatus').textContent = 'Poll failed -- retrying...'; } }
-pollAmq(); setInterval(pollAmq, 3000);
-document.getElementById('amqFeed').addEventListener('scroll', function() { amqAutoScroll = (this.scrollTop + this.clientHeight >= this.scrollHeight - 20); });
-var activeFilters = { project: null, type: null };
-function buildFilters() { var row = document.getElementById('filterRow'); row.innerHTML = ''; var allProjects = [...new Set(MEMORIES.map(m => m.project).filter(Boolean))]; var allTypes = [...new Set(MEMORIES.map(m => m.type).filter(Boolean))]; allProjects.forEach(function(p) { var btn = document.createElement('button'); btn.className = 'filter-btn' + (activeFilters.project === p ? ' active' : ''); btn.textContent = p; btn.onclick = function() { activeFilters.project = activeFilters.project === p ? null : p; buildFilters(); renderMemories(); }; row.appendChild(btn); }); allTypes.forEach(function(t) { var btn = document.createElement('button'); btn.className = 'filter-btn' + (activeFilters.type === t ? ' active' : ''); btn.textContent = t; btn.onclick = function() { activeFilters.type = activeFilters.type === t ? null : t; buildFilters(); renderMemories(); }; row.appendChild(btn); }); }
-function renderMemories() { var list = document.getElementById('memoryList'); var query = document.getElementById('searchInput').value.toLowerCase(); var filtered = MEMORIES; if (activeFilters.project) filtered = filtered.filter(m => m.project === activeFilters.project); if (activeFilters.type) filtered = filtered.filter(m => m.type === activeFilters.type); if (query) filtered = filtered.filter(m => m.content.toLowerCase().includes(query) || (m.tags || '').toLowerCase().includes(query)); if (filtered.length === 0) { list.innerHTML = '<div class="empty-state">No memories match filters.</div>'; return; } list.innerHTML = filtered.map(function(m) { var date = m.stored_at ? new Date(m.stored_at).toLocaleString('en-US', {timeZone: TZ}) : ''; var tagBadges = (m.tags || '').split(',').filter(Boolean).map(function(t) { return '<span class="badge badge-tag">' + t.trim() + '</span>'; }).join(''); var preview = m.content.length > 120 ? m.content.slice(0, 120) + '...' : m.content; return '<div class="memory-card" onclick="if(window.getSelection().toString().length>0)return;this.classList.toggle(\'expanded\')">' + '<div class="memory-meta">' + '<span class="badge badge-project">' + (m.project || 'general') + '</span>' + '<span class="badge badge-type">' + (m.type || 'note') + '</span>' + tagBadges + '<span class="memory-date">' + date + '</span>' + '</div>' + '<div class="memory-preview">' + escapeHtml(preview) + '</div>' + '<div class="memory-content">' + escapeHtml(m.content) + '</div>' + '<div class="memory-id">' + (m.id || '') + '</div>' + '</div>'; }).join(''); }
-function filterMemories() { renderMemories(); }
-buildFilters(); renderMemories();
+donut('tagChart', Object.keys(tags).slice(0,10), Object.values(tags).slice(0,10));
+
+// --- Stacked Activity Timeline ---
+const activity = {{ activity_json | safe }};
+const actDays = Object.keys(activity);
+new Chart(document.getElementById('activityChart'), {
+  type: 'bar',
+  data: {
+    labels: actDays.map(d => d.slice(5)),
+    datasets: [
+      { label: 'Memories', data: actDays.map(d => activity[d].memories), backgroundColor: '#9b59b6' },
+      { label: 'AMQ', data: actDays.map(d => activity[d].amq), backgroundColor: '#2d7dd2' },
+      { label: 'News', data: actDays.map(d => activity[d].news), backgroundColor: '#27ae60' },
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { stacked: true, ticks: { color: '#656d76', font: { size: 10 } }, grid: { display: false } },
+      y: { stacked: true, ticks: { color: '#656d76', font: { size: 10 } }, grid: { color: '#eef1f5' } }
+    },
+    plugins: { legend: { labels: { color: '#656d76', font: { size: 11 }, usePointStyle: true, pointStyleWidth: 8, padding: 12 } } }
+  }
+});
+
+// --- Mission Control Sparkline (auto-refreshing heartbeat) ---
+var sparklineChart = null;
+function renderSparkline(actData) {
+  var days = Object.keys(actData);
+  var config = {
+    type: 'line',
+    data: {
+      labels: days.map(function(d) { return d.slice(5); }),
+      datasets: [
+        { data: days.map(function(d) { return actData[d].memories; }), borderColor: '#9b59b6', borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: { target: 'origin', above: 'rgba(155,89,182,0.05)' } },
+        { data: days.map(function(d) { return actData[d].amq; }), borderColor: '#2d7dd2', borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: { target: 'origin', above: 'rgba(45,125,210,0.04)' } },
+        { data: days.map(function(d) { return actData[d].news; }), borderColor: '#27ae60', borderWidth: 1, pointRadius: 0, tension: 0.2, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { display: false }, y: { display: false, beginAtZero: true } },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      interaction: { enabled: false },
+      animation: { duration: 800, easing: 'easeOutQuart' }
+    }
+  };
+  if (sparklineChart) { sparklineChart.destroy(); }
+  sparklineChart = new Chart(document.getElementById('sparkline'), config);
+}
+renderSparkline(activity);
+
+async function refreshSparkline() {
+  try {
+    var r = await fetch('/api/activity?_t='+Date.now(), {cache:'no-store'});
+    var data = await r.json();
+    renderSparkline(data);
+  } catch(e) {}
+}
+setInterval(refreshSparkline, 30000);
+
+// --- AMQ Feed ---
+let lastAmqCount = 0;
+let expandedAmq = new Set();
+
+function agentClass(name) {
+  if (['kite','wren','knot'].includes(name)) return name;
+  return 'news';
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const today = new Date().toLocaleDateString('en-US', {timeZone: TZ});
+  const msgDay = d.toLocaleDateString('en-US', {timeZone: TZ});
+  const time = d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone: TZ});
+  return msgDay === today ? time : d.toLocaleDateString('en-US', {month:'short', day:'numeric', timeZone:TZ}) + ' ' + time;
+}
+
+function copyText(el, btn) {
+  var card = btn.closest('[data-copy]');
+  var text = card ? card.getAttribute('data-copy') : '';
+  // Fallback for non-HTTPS (LAN dashboard): hidden textarea + execCommand
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied!'; btn.style.color = '#2ea043';
+    setTimeout(function() { btn.textContent = 'Copy'; btn.style.color = ''; }, 1500);
+  } catch(e) {
+    btn.textContent = 'Failed'; btn.style.color = '#e74c3c';
+    setTimeout(function() { btn.textContent = 'Copy'; btn.style.color = ''; }, 1500);
+  }
+  event.stopPropagation();
+}
+
+function toggleAmq(el, id) {
+  if (window.getSelection().toString().length > 0) return;
+  if (expandedAmq.has(id)) { expandedAmq.delete(id); el.classList.remove('expanded'); }
+  else { expandedAmq.add(id); el.classList.add('expanded'); }
+}
+
+function renderAmq(messages) {
+  const feed = document.getElementById('amqFeed');
+  const counts = document.getElementById('amqCounts');
+  const status = document.getElementById('amqStatus');
+  if (!messages.length) { feed.innerHTML = '<div class="amq-empty">No messages.</div>'; status.textContent = 'No messages'; counts.innerHTML = ''; return; }
+
+  const byAgent = {};
+  messages.forEach(m => { byAgent[m.from] = (byAgent[m.from]||0) + 1; });
+  const unread = messages.filter(m => m.status === 'unread').length;
+  counts.innerHTML = Object.entries(byAgent).map(([a,c]) =>
+    '<span class="amq-count-badge ' + agentClass(a) + '">' + a.charAt(0).toUpperCase()+a.slice(1) + ': ' + c + '</span>'
+  ).join('') + (unread ? '<span class="amq-count-badge" style="background:rgba(231,76,60,0.1);color:#e74c3c;border:1px solid rgba(231,76,60,0.25);">' + unread + ' unread</span>' : '');
+  status.textContent = messages.length + ' messages';
+
+  feed.innerHTML = messages.map(m => {
+    const from = m.from||'?', to = m.to||'?', cls = agentClass(from);
+    const exp = expandedAmq.has(m.id) ? ' expanded' : '';
+    const unr = m.status==='unread' ? ' unread' : '';
+    const bodyRaw = (m.body||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    const bodyHtml = m.body_html || (m.body||'').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+    return '<div class="amq-msg from-'+cls+unr+exp+'" data-copy="'+(m.body||'').replace(/"/g,'&quot;')+'" onclick="toggleAmq(this,\''+m.id+'\')">' +
+      '<button class="copy-btn" onclick="copyText(this.parentNode, this)">Copy</button>' +
+      '<div class="amq-msg-header">' +
+        '<span class="amq-sender '+cls+'">'+from+'</span>' +
+        '<span class="amq-arrow">&rarr;</span>' +
+        '<span class="amq-recipient">'+to+'</span>' +
+        (m.kind ? '<span class="amq-kind">'+m.kind+'</span>' : '') +
+        (m.status==='unread' ? '<span class="amq-unread-badge">NEW</span>' : '') +
+        '<span class="amq-time">'+formatDate(m.created)+'</span>' +
+      '</div>' +
+      (m.subject ? '<div class="amq-subject">'+(m.subject||'').replace(/</g,'&lt;')+'</div>' : '') +
+      '<div class="amq-body">'+bodyHtml+'</div>' +
+    '</div>';
+  }).join('');
+  if (messages.length > lastAmqCount) feed.scrollTop = 0;
+  lastAmqCount = messages.length;
+}
+
+async function pollAmq() {
+  try {
+    const r = await fetch('/api/amq?_t='+Date.now(), {cache:'no-store'});
+    renderAmq(await r.json());
+  } catch(e) { document.getElementById('amqStatus').textContent = 'Poll failed'; }
+}
+pollAmq();
+setInterval(pollAmq, 5000);
+
+// --- Collection Browser ---
+function getData() { return currentTab === 'news' ? NEWS : MEMORIES; }
+
+function switchTab(tab) {
+  currentTab = tab; currentPage = 0;
+  activeFilters = { project: null, type: null };
+  document.getElementById('searchInput').value = '';
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', (i===0&&tab==='memories')||(i===1&&tab==='news')));
+  buildFilters(); renderPage();
+}
+
+function getFiltered() {
+  let data = getData();
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  if (activeFilters.project) data = data.filter(m => m.project === activeFilters.project);
+  if (activeFilters.type) data = data.filter(m => m.type === activeFilters.type);
+  if (q) data = data.filter(m => (m.content||'').toLowerCase().includes(q) || (m.tags||'').toLowerCase().includes(q));
+  return data;
+}
+
+function buildFilters() {
+  const row = document.getElementById('filterRow'); row.innerHTML = '';
+  const data = getData();
+  const allP = [...new Set(data.map(m => m.project).filter(Boolean))];
+  const allT = [...new Set(data.map(m => m.type).filter(Boolean))];
+  allP.forEach(p => {
+    const b = document.createElement('button'); b.className = 'filter-btn'+(activeFilters.project===p?' active':'');
+    b.textContent = p; b.onclick = () => { activeFilters.project = activeFilters.project===p?null:p; currentPage=0; buildFilters(); renderPage(); };
+    row.appendChild(b);
+  });
+  allT.forEach(t => {
+    const b = document.createElement('button'); b.className = 'filter-btn'+(activeFilters.type===t?' active':'');
+    b.textContent = t; b.onclick = () => { activeFilters.type = activeFilters.type===t?null:t; currentPage=0; buildFilters(); renderPage(); };
+    row.appendChild(b);
+  });
+}
+
+function renderPage() {
+  const filtered = getFiltered();
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  if (currentPage >= totalPages) currentPage = Math.max(0, totalPages - 1);
+  const start = currentPage * PAGE_SIZE;
+  const page = filtered.slice(start, start + PAGE_SIZE);
+  const list = document.getElementById('memoryList');
+
+  if (!page.length) { list.innerHTML = '<div class="empty-state">No items match filters.</div>'; document.getElementById('pagination').innerHTML=''; return; }
+
+  list.innerHTML = page.map(m => {
+    const date = m.stored_at ? new Date(m.stored_at).toLocaleString('en-US', {timeZone:TZ}) : '';
+    const tagBadges = (m.tags||'').split(',').filter(Boolean).map(t => '<span class="badge badge-tag">'+t.trim()+'</span>').join('');
+    const preview = (m.content||'').length > 120 ? (m.content||'').slice(0,120).replace(/</g,'&lt;')+'...' : (m.content||'').replace(/</g,'&lt;');
+    const contentHtml = m.content_html || (m.content||'').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+    const rawContent = (m.content||'').replace(/"/g,'&quot;');
+    return '<div class="memory-card" data-copy="'+rawContent+'" onclick="if(window.getSelection().toString().length>0)return;this.classList.toggle(\'expanded\')">' +
+      '<button class="copy-btn" onclick="copyText(this.parentNode, this)">Copy</button>' +
+      '<div class="memory-meta">' +
+        '<span class="badge badge-project">'+(m.project||'general')+'</span>' +
+        '<span class="badge badge-type">'+(m.type||'note')+'</span>' +
+        tagBadges +
+        '<span class="memory-date">'+date+'</span>' +
+      '</div>' +
+      '<div class="memory-preview">'+preview+'</div>' +
+      '<div class="memory-content">'+contentHtml+'</div>' +
+      '<div class="memory-id">'+(m.id||'')+'</div>' +
+    '</div>';
+  }).join('');
+
+  const pag = document.getElementById('pagination');
+  if (totalPages <= 1) { pag.innerHTML = ''; return; }
+  pag.innerHTML =
+    '<button onclick="currentPage=0;renderPage()" '+(currentPage===0?'disabled':'')+'>&#171;</button>' +
+    '<button onclick="currentPage--;renderPage()" '+(currentPage===0?'disabled':'')+'>&#8249; Prev</button>' +
+    '<span class="page-info">'+(currentPage+1)+' / '+totalPages+' ('+filtered.length+' items)</span>' +
+    '<button onclick="currentPage++;renderPage()" '+(currentPage>=totalPages-1?'disabled':'')+'>Next &#8250;</button>' +
+    '<button onclick="currentPage='+String(totalPages-1)+';renderPage()" '+(currentPage>=totalPages-1?'disabled':'')+'>&#187;</button>';
+}
+
+// --- AMQ Compose ---
+async function sendAmq() {
+  const btn = document.getElementById('composeSend');
+  const fb = document.getElementById('composeFeedback');
+  const from = document.getElementById('composeFrom').value;
+  const to = document.getElementById('composeTo').value;
+  const subject = document.getElementById('composeSubject').value.trim();
+  const body = document.getElementById('composeBody').value.trim();
+  if (!body) { fb.textContent = 'Body is required'; fb.className = 'compose-feedback err'; return; }
+  btn.disabled = true; fb.textContent = 'Sending...'; fb.className = 'compose-feedback';
+  try {
+    const r = await fetch('/api/amq/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({from: from, to: to, subject: subject, body: body})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      fb.textContent = 'Sent to ' + to + ' \u2713'; fb.className = 'compose-feedback ok';
+      document.getElementById('composeBody').value = '';
+      document.getElementById('composeSubject').value = '';
+      pollAmq();
+    } else {
+      fb.textContent = data.error || 'Send failed'; fb.className = 'compose-feedback err';
+    }
+  } catch(e) { fb.textContent = e.message; fb.className = 'compose-feedback err'; }
+  btn.disabled = false;
+}
+
+// --- System Status Polling ---
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/system?_t='+Date.now(), {cache:'no-store'});
+    const d = await r.json();
+    document.getElementById('statusUptime').textContent = 'Uptime: ' + d.uptime;
+    document.getElementById('statusModel').textContent = d.model;
+    document.getElementById('dotPersmem').className = 'status-dot ' + (d.persmem_ok ? 'green' : 'red');
+  } catch(e) {
+    document.getElementById('dotPersmem').className = 'status-dot red';
+  }
+}
+pollStatus();
+setInterval(pollStatus, 30000);
+
+buildFilters();
+renderPage();
 </script>
 </body>
 </html>
 """
 
-@app.route("/")
-def dashboard():
-    memories = get_all_memories()
-    total = len(memories)
-    projects = Counter(m.get("project", "general") for m in memories)
-    types = Counter(m.get("type", "note") for m in memories)
-    all_tags = []
-    for m in memories:
-        all_tags.extend(t.strip() for t in m.get("tags", "").split(",") if t.strip())
-    tag_counts = Counter(all_tags)
-    unique_tags = len(tag_counts)
-    char_counts = [m.get("char_count", len(m.get("content", ""))) for m in memories]
-    avg_chars = sum(char_counts) / max(len(char_counts), 1)
-    timeline = Counter()
-    oldest = None
-    for m in memories:
-        ts = m.get("stored_at", "")
-        if ts:
-            day = ts[:10]
-            timeline[day] += 1
-            if oldest is None or day < oldest:
-                oldest = day
-    timeline = dict(sorted(timeline.items()))
-    memories_sorted = sorted(memories, key=lambda m: m.get("stored_at", ""), reverse=True)
-    return render_template_string(
-        DASHBOARD_HTML, total=total, projects=projects, types=types,
-        unique_tags=unique_tags, avg_chars=avg_chars, oldest_day=oldest or "---",
-        projects_json=json.dumps(dict(projects)), types_json=json.dumps(dict(types)),
-        tags_json=json.dumps(dict(tag_counts.most_common(10))),
-        timeline_json=json.dumps(timeline),
-        memories_json=json.dumps(memories_sorted, default=str),
-    )
 
-@app.route("/api/memories")
-def api_memories():
-    return jsonify(get_all_memories())
+def safe_json(data):
+    """JSON-encode for safe embedding inside HTML <script> tags.
+    Escapes </ sequences that would prematurely close script blocks."""
+    return json.dumps(data, default=str).replace("</", r"<\/")
 
-@app.route("/api/stats")
-def api_stats():
-    memories = get_all_memories()
-    projects = Counter(m.get("project", "general") for m in memories)
-    types = Counter(m.get("type", "note") for m in memories)
-    return jsonify({"total": len(memories), "projects": dict(projects), "types": dict(types)})
 
-@app.route("/api/amq")
-def api_amq():
-    """JSON API for AMQ messages -- polled by live feed."""
-    data = get_amq_messages()
-    resp = make_response(jsonify(data))
+# ============================
+# Routes
+# ============================
+
+def no_cache(resp):
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     resp.headers['Pragma'] = 'no-cache'
     resp.headers['Expires'] = '0'
     return resp
 
+
+@app.route("/")
+def dashboard():
+    memories = get_all_from_collection("memories")
+    news_items = get_all_from_collection("news")
+    amq_messages = get_amq_messages()
+    agents = discover_agents()
+
+    total_memories = len(memories)
+    total_news = len(news_items)
+    total_amq = len(amq_messages)
+
+    projects = Counter(m.get("project", "general") for m in memories)
+    types = Counter(m.get("type", "note") for m in memories)
+
+    all_tags = []
+    for m in memories:
+        all_tags.extend(t.strip() for t in m.get("tags", "").split(",") if t.strip())
+    tag_counts = Counter(all_tags)
+    unique_tags = len(tag_counts)
+
+    # Render markdown for memories and news
+    memories_sorted = sorted(memories, key=lambda m: m.get("stored_at", ""), reverse=True)
+    for m in memories_sorted:
+        m["content_html"] = mini_markdown(m.get("content", ""))
+
+    news_sorted = sorted(news_items, key=lambda n: n.get("stored_at", ""), reverse=True)
+    for n in news_sorted:
+        # News items contain raw HTML from RSS feeds — strip to clean text, then render
+        cleaned = strip_html(n.get("content", ""))
+        n["content_html"] = mini_markdown(cleaned)
+        n["content"] = cleaned  # Also clean the raw content for preview/copy
+
+    activity = get_activity_data(memories, news_items, amq_messages)
+
+    resp = make_response(render_template_string(
+        DASHBOARD_HTML,
+        total_memories=total_memories,
+        total_news=total_news,
+        total_amq=total_amq,
+        projects=projects,
+        types=types,
+        unique_tags=unique_tags,
+        agents=agents,
+        page_size=PAGE_SIZE,
+        projects_json=safe_json(dict(projects)),
+        types_json=safe_json(dict(types)),
+        tags_json=safe_json(dict(tag_counts.most_common(10))),
+        activity_json=safe_json(activity),
+        memories_json=safe_json(memories_sorted),
+        news_json=safe_json(news_sorted),
+    ))
+    return no_cache(resp)
+
+
+@app.route("/api/memories")
+def api_memories():
+    return jsonify(get_all_from_collection("memories"))
+
+
+@app.route("/api/news")
+def api_news():
+    return jsonify(get_all_from_collection("news"))
+
+
+@app.route("/api/stats")
+def api_stats():
+    memories = get_all_from_collection("memories")
+    projects = Counter(m.get("project", "general") for m in memories)
+    types = Counter(m.get("type", "note") for m in memories)
+    collections = list_collections()
+    return jsonify({
+        "total": len(memories),
+        "projects": dict(projects),
+        "types": dict(types),
+        "collections": [{"name": n, "count": c} for n, c in collections],
+    })
+
+
+@app.route("/api/amq")
+def api_amq():
+    data = get_amq_messages()
+    return no_cache(make_response(jsonify(data)))
+
+
+@app.route("/api/amq/send", methods=["POST"])
+def api_amq_send():
+    """Send an AMQ message from the dashboard (Holden → agent)."""
+    try:
+        data = request.get_json()
+        from_agent = data.get("from", "holden")
+        to_agent = data.get("to", "")
+        subject = data.get("subject", "")
+        body = data.get("body", "")
+
+        if not to_agent or not body:
+            return jsonify({"ok": False, "error": "to and body required"})
+
+        # Build message in AMQ Maildir format
+        now = datetime.now(timezone.utc)
+        ts = now.strftime("%Y%m%dT%H%M%S")
+        us = f"{now.microsecond:06d}"
+        short_id = uuid.uuid4().hex[:8]
+        msg_id = f"{ts}-{us}_{from_agent}_{short_id}"
+
+        headers = {
+            "schema": 1,
+            "id": msg_id,
+            "from": from_agent,
+            "to": to_agent,
+            "subject": subject,
+            "kind": "message",
+            "priority": "normal",
+            "created": now.isoformat(),
+        }
+
+        content = f"---json\n{json.dumps(headers, indent=2)}\n---\n{body}\n"
+
+        # Write to recipient's inbox/new/ (Maildir atomic: write to tmp, move to new)
+        inbox_new = os.path.join(AMQ_ROOT, to_agent, "inbox", "new")
+        inbox_tmp = os.path.join(AMQ_ROOT, to_agent, "inbox", "tmp")
+        os.makedirs(inbox_new, exist_ok=True)
+        os.makedirs(inbox_tmp, exist_ok=True)
+
+        fname = f"{msg_id}.md"
+        tmp_path = os.path.join(inbox_tmp, fname)
+        new_path = os.path.join(inbox_new, fname)
+
+        with open(tmp_path, "w") as f:
+            f.write(content)
+        os.rename(tmp_path, new_path)
+
+        return jsonify({"ok": True, "id": msg_id, "to": to_agent})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/system")
+def api_system():
+    """System status for the status bar."""
+    try:
+        # Uptime
+        with open("/proc/uptime") as f:
+            up_secs = float(f.read().split()[0])
+        days = int(up_secs // 86400)
+        hours = int((up_secs % 86400) // 3600)
+        mins = int((up_secs % 3600) // 60)
+        if days > 0:
+            uptime_str = f"{days}d {hours}h {mins}m"
+        elif hours > 0:
+            uptime_str = f"{hours}h {mins}m"
+        else:
+            uptime_str = f"{mins}m"
+
+        # Collection counts
+        collections = list_collections()
+        col_dict = {n: c for n, c in collections}
+        memories = col_dict.get("memories", 0)
+        news = col_dict.get("news", 0)
+
+        # AMQ count
+        amq_count = 0
+        for agent in discover_agents():
+            for subdir in ["new", "cur"]:
+                dirpath = os.path.join(AMQ_ROOT, agent, "inbox", subdir)
+                try:
+                    amq_count += len([f for f in os.listdir(dirpath) if f.endswith(".md")])
+                except OSError:
+                    pass
+
+        # Model name — read from server.py default since env var isn't in dashboard scope
+        model_name = "unknown"
+        try:
+            with open("/opt/persmem/server.py", "r") as f:
+                for line in f:
+                    if "PERSMEM_EMBEDDING_MODEL" in line and "os.environ" in line:
+                        # Extract default path from: os.environ.get("PERSMEM_EMBEDDING_MODEL", "/opt/persmem/models/voyage-4-nano")
+                        parts = line.split('"')
+                        for i, p in enumerate(parts):
+                            if "/opt/persmem/models/" in p:
+                                model_name = os.path.basename(p)
+                                break
+                        break
+        except OSError:
+            pass
+
+        # persMEM service check (quick)
+        persmem_ok = True  # if dashboard can read chromadb, persmem infra is up
+
+        return no_cache(make_response(jsonify({
+            "uptime": uptime_str,
+            "memories": memories,
+            "news": news,
+            "amq": amq_count,
+            "model": model_name,
+            "persmem_ok": persmem_ok,
+        })))
+    except Exception as e:
+        return jsonify({"uptime": "error", "persmem_ok": False, "error": str(e)})
+
+
+@app.route("/api/export/memories.json")
+def api_export_memories_json():
+    """Download all memories as JSON."""
+    memories = get_all_from_collection("memories")
+    resp = make_response(json.dumps(memories, indent=2, default=str))
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Content-Disposition"] = "attachment; filename=persmem-memories.json"
+    return resp
+
+
+@app.route("/api/export/memories.md")
+def api_export_memories_md():
+    """Download all memories as Markdown."""
+    memories = get_all_from_collection("memories")
+    memories_sorted = sorted(memories, key=lambda m: m.get("stored_at", ""), reverse=True)
+    lines = [f"# persMEM Memory Export\n\nExported: {datetime.now(timezone.utc).isoformat()}\n\nTotal: {len(memories_sorted)} memories\n\n---\n"]
+    for m in memories_sorted:
+        project = m.get("project", "general")
+        mtype = m.get("type", "note")
+        tags = m.get("tags", "")
+        stored = m.get("stored_at", "")
+        mid = m.get("id", "")
+        lines.append(f"## [{project}] {mtype} — {stored[:10]}\n")
+        if tags:
+            lines.append(f"**Tags:** {tags}\n")
+        lines.append(f"**ID:** `{mid}`\n\n")
+        lines.append(m.get("content", "") + "\n\n---\n\n")
+    resp = make_response("".join(lines))
+    resp.headers["Content-Type"] = "text/markdown; charset=utf-8"
+    resp.headers["Content-Disposition"] = "attachment; filename=persmem-memories.md"
+    return resp
+
+
+@app.route("/api/export/news.json")
+def api_export_news_json():
+    """Download all news items as JSON."""
+    news = get_all_from_collection("news")
+    resp = make_response(json.dumps(news, indent=2, default=str))
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["Content-Disposition"] = "attachment; filename=persmem-news.json"
+    return resp
+
+
+@app.route("/api/activity")
+def api_activity():
+    """Fresh activity data for sparkline auto-refresh."""
+    memories = get_all_from_collection("memories")
+    news_items = get_all_from_collection("news")
+    amq_messages = get_amq_messages()
+    activity = get_activity_data(memories, news_items, amq_messages)
+    return no_cache(make_response(jsonify(activity)))
+
+
 if __name__ == "__main__":
-    print(f"persMEM Dashboard starting on http://0.0.0.0:{PORT}")
+    agents = discover_agents()
+    print(f"persMEM Dashboard v2.1 starting on http://0.0.0.0:{PORT}")
     print(f"  ChromaDB: {CHROMADB_PATH}")
     print(f"  AMQ root: {AMQ_ROOT}")
-    print(f"  LAN access: http://<your-lan-ip>:{PORT}")
+    print(f"  Agents discovered: {', '.join(agents)}")
+    print(f"  LAN access: http://<YOUR_LXC_IP>:{PORT}")
     app.run(host=HOST, port=PORT, debug=False)

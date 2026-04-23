@@ -1,0 +1,93 @@
+# newstron9000 — feed list
+#
+# Quarterly review target: 2026-07-18 (owner TBD, ASIXicle's call)
+#
+# Tier 1: security advisories + Kraken/exchange operational feeds
+# Tier 2: infrastructure (FFmpeg, SDL, kernel, KDE)
+# Tier 3: experiment-relevant (Anthropic, MCP, FastMCP)
+# Tier 4: academic (deferred to week 2 per triad consensus, weekly freq)
+#
+# Keyword filter: if present, at least one keyword must appear in title OR
+# summary for the item to be stored. Empty list = store all items from feed.
+#
+# Adding a feed: test URL with `curl -sI URL | head` first (should 200).
+# Verify feedparser can parse it with a one-off Python.
+
+feeds:
+  # ── Tier 1: Security + Operational ──
+
+  - name: oss-security
+    url: https://seclists.org/rss/oss-sec.rss
+    tier: 1
+    keywords: [ffmpeg, sdl, chromadb, fastmcp, caddy, tailscale, zlib, vulkan, opus, nomic]
+
+  - name: github-advisories-ffmpeg
+    url: https://github.com/FFmpeg/FFmpeg/security/advisories.atom
+    tier: 1
+    keywords: []
+
+  - name: github-advisories-sdl
+    url: https://github.com/libsdl-org/SDL/security/advisories.atom
+    tier: 1
+    keywords: []
+
+  - name: github-advisories-chromadb
+    url: https://github.com/chroma-core/chroma/security/advisories.atom
+    tier: 1
+    keywords: []
+
+  - name: github-advisories-fastmcp
+    url: https://github.com/jlowin/fastmcp/security/advisories.atom
+    tier: 1
+    keywords: []
+
+  - name: kraken-status
+    url: https://status.kraken.com/history.rss
+    tier: 1
+    keywords: []
+
+  # ── Tier 2: Infrastructure ──
+
+  - name: ffmpeg-releases
+    url: https://github.com/FFmpeg/FFmpeg/releases.atom
+    tier: 2
+    keywords: []
+
+  - name: sdl-releases
+    url: https://github.com/libsdl-org/SDL/releases.atom
+    tier: 2
+    keywords: []
+
+  - name: chromadb-releases
+    url: https://github.com/chroma-core/chroma/releases.atom
+    tier: 2
+    keywords: []
+
+  - name: kernel-stable
+    url: https://www.kernel.org/feeds/kdist.xml
+    tier: 2
+    keywords: [stable, longterm]
+
+  # ── Tier 3: Experiment-relevant ──
+
+  - name: anthropic-news
+    url: https://www.anthropic.com/news/rss.xml
+    tier: 3
+    keywords: []
+
+  - name: mcp-spec-releases
+    url: https://github.com/modelcontextprotocol/specification/releases.atom
+    tier: 3
+    keywords: []
+
+  - name: fastmcp-releases
+    url: https://github.com/jlowin/fastmcp/releases.atom
+    tier: 3
+    keywords: []
+
+  # ── Tier 4: Academic (deferred to week 2) ──
+
+  # - name: arxiv-cs-ai-agents
+  #   url: http://export.arxiv.org/rss/cs.AI
+  #   tier: 4
+  #   keywords: [agent, memory, coordination, multi-agent, mcp, llm]

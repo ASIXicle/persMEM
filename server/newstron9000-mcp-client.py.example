@@ -1,0 +1,158 @@
+"""
+mcp_client.py — Minimal MCP client for newstron9000 -> persmem calls.
+
+newstron9000 uses two tools:
+  - news_store(secret, content, url, tier, source, keywords, item_date)
+  - news_search(query, top_k, tier, since)  [used by digest.py for dedup]
+
+The MCP streamable-HTTP protocol requires an initialize handshake before
+tool calls. This client hides that behind a simple call() method.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from typing import Any, Optional
+
+import requests
+
+
+MCP_URL = os.environ.get(
+    "PERSMEM_MCP_URL",
+    "http://127.0.0.1:8000/YOUR_SECRET_PATH/mcp",
+)
+
+
+def _load_secret() -> str:
+    """Read NEWSTRON_SECRET from /home/newstron9000/.env."""
+    try:
+        with open("/home/newstron9000/.env") as f:
+            for line in f:
+                if line.startswith("NEWSTRON_SECRET="):
+                    return line.split("=", 1)[1].strip()
+    except FileNotFoundError:
+        pass
+    raise SystemExit("ERROR: NEWSTRON_SECRET not found in /home/newstron9000/.env")
+
+
+SECRET = _load_secret()
+
+
+class MCPClient:
+    """Single-session MCP client. Initialize once, call tools many times."""
+
+    def __init__(self, url: str = MCP_URL, timeout: int = 30) -> None:
+        self.url = url
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        self._next_id = 1
+        self._initialized = False
+
+    def _next(self) -> int:
+        n = self._next_id
+        self._next_id += 1
+        return n
+
+    def _parse_response(self, r: requests.Response) -> dict[str, Any]:
+        """Parse either JSON or SSE event-stream response."""
+        ct = r.headers.get("content-type", "")
+        if "event-stream" in ct:
+            for line in r.text.splitlines():
+                if line.startswith("data: "):
+                    return json.loads(line[6:])
+            raise RuntimeError(f"No data line in SSE response: {r.text[:500]}")
+        return r.json()
+
+    def initialize(self) -> None:
+        req = {
+            "jsonrpc": "2.0",
+            "id": self._next(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "newstron9000", "version": "0.1"},
+            },
+        }
+        r = self.session.post(self.url, json=req, headers=self.headers, timeout=self.timeout)
+        r.raise_for_status()
+        sid = r.headers.get("Mcp-Session-Id") or r.headers.get("mcp-session-id")
+        if sid:
+            self.headers["Mcp-Session-Id"] = sid
+        # Required follow-up notification
+        notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        self.session.post(self.url, json=notif, headers=self.headers, timeout=self.timeout)
+        self._initialized = True
+
+    def call(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Call an MCP tool. Returns the tool's structured result (parsed)."""
+        if not self._initialized:
+            self.initialize()
+        req = {
+            "jsonrpc": "2.0",
+            "id": self._next(),
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args},
+        }
+        r = self.session.post(self.url, json=req, headers=self.headers, timeout=self.timeout)
+        r.raise_for_status()
+        payload = self._parse_response(r)
+        if "error" in payload:
+            raise RuntimeError(f"MCP error: {payload['error']}")
+        # Tool responses come back as text content wrapping JSON
+        result = payload.get("result", {})
+        content = result.get("content", [])
+        if content and content[0].get("type") == "text":
+            try:
+                return json.loads(content[0]["text"])
+            except json.JSONDecodeError:
+                return {"raw": content[0]["text"]}
+        return result
+
+    def news_store(
+        self,
+        content: str,
+        url: str,
+        tier: int,
+        source: str,
+        keywords: str = "",
+        item_date: str = "",
+    ) -> dict[str, Any]:
+        return self.call(
+            "news_store",
+            {
+                "secret": SECRET,
+                "content": content,
+                "url": url,
+                "tier": tier,
+                "source": source,
+                "keywords": keywords,
+                "item_date": item_date,
+            },
+        )
+
+    def news_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        tier: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {"query": query, "top_k": top_k}
+        if tier is not None:
+            args["tier"] = tier
+        if since is not None:
+            args["since"] = since
+        return self.call("news_search", args)
+
+
+if __name__ == "__main__":
+    # Smoke test: ping news_search (returns empty if collection is fresh)
+    c = MCPClient()
+    result = c.news_search("test", top_k=1)
+    print(json.dumps(result, indent=2))
