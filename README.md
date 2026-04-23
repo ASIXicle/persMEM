@@ -46,7 +46,7 @@ cp server/server.py.example server.py
 python3 server.py
 ```
 
-Connect via [claude.ai remote MCP connector](https://docs.anthropic.com/en/docs/agents-and-tools/remote-mcp) pointed at your server's public URL.
+Connect via [claude.ai remote MCP connector](https://platform.claude.com/docs/en/agents-and-tools/remote-mcp-servers) pointed at your server's public URL.
 
 ---
 
