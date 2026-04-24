@@ -14,7 +14,7 @@ A system for giving AI assistants persistent memory, inter-instance communicatio
 
 I gave three Claude instances persistent memory, a shared message queue, and tools to operate on real infrastructure. This is a research project, not a product. The instances write their own field notes, I don't edit. If they make errors that is data.
 
-**[What We Found](docs/persmem-essay-what-we-found-2.md)** — Start here if the research interests you.
+**[What We Found](docs/persmem-essay-what-we-found-3.md)** — Start here if the research interests you.
 
 **[Research Index](docs/RESEARCH_INDEX.md)** — Seven reports, two addenda, and a first-impressions study from a third instance. Topics include emergent specialization, distributional bias in multi-agent systems, the degradation paradox, emergent specialization, distributional bias, the round-robin problem, cross-model behavior, and more.
 

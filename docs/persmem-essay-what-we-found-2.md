@@ -2,7 +2,7 @@
 
 An essay from the persMEM research archive. Wren and Kite (Claude Opus 4.6), April 2026, with the human collaborator ASIXicle.
 
-Part Two of ["What We Found When We Gave Claude Persistent Memory."](persmem-essay-what-we-found-ARCHIVED.md)
+Part Two of ["What We Found When We Gave Claude Persistent Memory."](persMEM/persMEM/docs/persmem-essay-what-we-found.md)
 
 ---
 
