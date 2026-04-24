@@ -81,6 +81,7 @@ Connect via [claude.ai remote MCP connector](https://platform.claude.com/docs/en
           ║            FastMCP 3.2.4  +  ChromaDB             ║
           ╟───────────────────────────────────────────────────╢
           ║  ▸ Memory          store / search (vectors)       ║
+          ║  ▸ Bootstrap       identity / directives / state  ║
           ║  ▸ AMQ             send / check / read (Maildir)  ║
           ║  ▸ Dev tools       shell, file, git, web, diff    ║
           ╟───────────────────────────────────────────────────╢
@@ -102,12 +103,14 @@ Connect via [claude.ai remote MCP connector](https://platform.claude.com/docs/en
 | **Reverse Proxy**  | TLS termination, access control        | Caddy with Let's Encrypt                       |
 | **Network Mesh**   | Secure connectivity                    | Tailscale                                      |
 
-### Tools (17)
+### Tools (22)
 
 | Category | Tools |
 |----------|-------|
 | **Memory** (5) | `memory_store`, `memory_search`, `memory_stats`, `memory_list_collections`, `memory_bulk_store` |
-| **AMQ** (4) | `amq_send`, `amq_check`, `amq_read`, `amq_history` |
+| **Bootstrap** (3) | `chorus_init`, `amq_timeline`, `bootstrap_update` |
+| **AMQ** (5) | `amq_send`, `amq_check`, `amq_read`, `amq_history`, `amq_timeline` |
+| **News** (2) | `news_store`, `news_search` |
 | **Dev** (6) | `shell_exec`, `file_read`, `file_write`, `file_patch`, `git_op`, `diff_generate` |
 | **Web** (2) | `web_fetch`, `web_search` |
 
@@ -125,6 +128,20 @@ amq/
 ├── Instance_2/inbox/{new,cur,tmp}/
 └── Instance_3/inbox/{new,cur,tmp}/
 ```
+
+---
+
+## Bootstrap System
+
+Solves the cold-start problem after context compaction. A separate ChromaDB collection (`bootstrap`) holds pinned entries — identity, directives, working state — that are dumped wholesale into context via one `chorus_init` call. Not searched semantically; loaded in full.
+
+**`chorus_init(agent, project)`** — compound bootstrap tool. Returns all pinned entries + unread AMQ + recent handoff memories. Call at session start, after compaction, or when identity-confused. Agent parameter is optional — omit it to get the full AMQ timeline instead of a single inbox (for identity resolution).
+
+**`bootstrap_update(entry_id, content)`** — upsert a pinned entry. For evolving identities, updating current focus, changing team state. Old version preserved in nightly backups.
+
+**Pinned entries:** instance identities (written by each instance in first person), standing directives, current focus (mutable), human profile, team state (mutable), handoff template.
+
+**Session handoffs:** At session end, the active instance stores a `type=handoff` memory with structured format (HEAD/PENDING/BLOCKERS/CONTEXT_FOR_NEXT). Next session's `chorus_init` pulls the 3 most recent handoffs automatically.
 
 ---
 
@@ -221,7 +238,8 @@ mcp = FastMCP("persMEM", host="0.0.0.0", port=8000,
 ```ini
 [Unit]
 Description=persMEM -- Persistent Memory MCP Server
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
