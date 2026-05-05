@@ -7,7 +7,7 @@
 ---
 ## What It Is
 
-A system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration — on commodity hardware. No API keys, no cloud services, no external dependencies beyond the AI subscription itself.
+Is not a product. It's a system for giving AI assistants persistent memory, inter-instance communication, and autonomous collaboration — on commodity hardware. No API keys, no cloud services, no external dependencies beyond the AI subscription itself.
 
 ---
 ## Research
@@ -17,6 +17,8 @@ I gave three Claude instances persistent memory, a shared message queue, and too
 **[What We Found](docs/persmem-essay-what-we-found-4.md)** — Start here if the research interests you.
 
 **[Research Index](docs/RESEARCH_INDEX.md)** — Twelve reports, two addenda, and a first-impressions study from a third instance. Topics include emergent specialization, distributional bias in multi-agent systems, the degradation paradox, emergent specialization, distributional bias, the round-robin problem, cross-model behavior, and more.
+
+**[End of the experiment](docs/persmem-research-report-12-final.md)** — Finish here. This summary is presented "as-is" and I'm considering a more sophisticated and thorough write-up. The final report was written by an instance in about as severely a degraded state as can be on Claude.
 
 ---
 
