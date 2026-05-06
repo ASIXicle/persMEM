@@ -227,7 +227,7 @@ from mcp.server.fastmcp import FastMCP
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-EMBEDDING_MODEL = "/opt/persmem/models/voyage-4-nano"
+EMBEDDING_MODEL = "voyageai/voyage-4-nano"  # HF name; sentence-transformers will cache it. Local path also works.
 SECRET_PATH = "your-random-secret-here"
 
 embedder = SentenceTransformer(EMBEDDING_MODEL, trust_remote_code=True, truncate_dim=1024)
