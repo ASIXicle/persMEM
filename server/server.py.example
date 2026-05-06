@@ -28,7 +28,7 @@ DATA_DIR = os.environ.get("PERSMEM_DATA_DIR", "/var/lib/persmem/chromadb")
 HOST = os.environ.get("PERSMEM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PERSMEM_PORT", "8000"))
 SECRET_PATH = os.environ.get("PERSMEM_SECRET_PATH", "dev")
-EMBEDDING_MODEL = os.environ.get("PERSMEM_EMBEDDING_MODEL", "/opt/persmem/models/voyage-4-nano")
+EMBEDDING_MODEL = os.environ.get("PERSMEM_EMBEDDING_MODEL", "voyageai/voyage-4-nano")
 NEWSTRON_SECRET = os.environ.get("NEWSTRON_SECRET", "")  # shared secret for newstron9000 -> news_store; empty string disables the endpoint
 
 # ---------------------------------------------------------------------------
@@ -492,7 +492,7 @@ def _validate_command(command: str) -> str | None:
 @mcp.tool()
 async def shell_exec(
     command: str,
-    workdir: str = "/home/persmem",
+    workdir: str = "/var/lib/persmem/work",
     timeout: int = 30,
 ) -> str:
     """
@@ -769,7 +769,7 @@ async def diff_generate(
 @mcp.tool()
 async def git_op(
     operation: str,
-    repo_path: str = "/home/persmem/repos",
+    repo_path: str = "/var/lib/persmem/repos",
     args: str = "",
     clone_url: str = "",
 ) -> str:
@@ -778,7 +778,7 @@ async def git_op(
 
     Args:
         operation: One of: clone, status, diff, log, apply, add, commit, branch, checkout, pull, push, show
-        repo_path: Path to the repo (or parent dir for clone). Default /home/persmem/repos.
+        repo_path: Path to the repo (or parent dir for clone). Default /var/lib/persmem/repos.
         args: Extra arguments (e.g., "--stat" for diff, "-n 10" for log, branch name for checkout).
         clone_url: Required for clone operation. The URL to clone.
     """
@@ -850,13 +850,22 @@ async def web_search(
 ) -> str:
     """
     Search the web via SearXNG. Returns JSON array of results with url, title, content.
+
+    Requires PERSMEM_SEARXNG_URL env var pointing at your SearXNG instance
+    (e.g., 'http://10.0.0.5:8888' on a private network or Tailnet).
+    If unset, the tool returns an error and instances should fall back
+    to web_fetch on a known URL.
+
     Args:
         query: Search query string.
         max_results: Max results to return (default 5).
     """
+    searxng_url = os.environ.get("PERSMEM_SEARXNG_URL", "")
+    if not searxng_url:
+        return _json.dumps({"error": "PERSMEM_SEARXNG_URL not configured. Set the env var to your SearXNG instance (private network recommended)."})
     try:
         params = _urlparse.urlencode({"q": query, "format": "json"})
-        url = f"http://100.112.64.49:8888/search?{params}"
+        url = f"{searxng_url.rstrip('/')}/search?{params}"
         req = _urlreq.Request(url, headers={"User-Agent": "persMEM/1.0"})
         with _urlreq.urlopen(req, timeout=15) as resp:
             data = _json.loads(resp.read())
@@ -874,16 +883,32 @@ async def web_search(
 # ---------------------------------------------------------------------------
 # AMQ — Agent Message Queue (Maildir-style inter-instance messaging)
 # ---------------------------------------------------------------------------
-AMQ_ROOT = "/home/persmem/amq"
-AMQ_AGENTS = {"kite", "wren", "knot", "news"}
+# Configure agents and roots via env vars.
+#
+#   PERSMEM_AMQ_ROOT       — base directory for mailboxes (default: /var/lib/persmem-amq)
+#   PERSMEM_AMQ_AGENTS     — comma-separated agent names (default: 'agent1,agent2,agent3')
+#                            Each agent gets a mailbox at <root>/<agent>/inbox/{new,cur,tmp}
+#   PERSMEM_AMQ_AGENT_ROOTS — optional JSON for per-agent root overrides, e.g.
+#                            '{"news": "/var/lib/news-amq"}' to put a feed agent
+#                            outside the default root.
+#
+# Suggested setup: a Linux user 'persmem' owns the default root, additional
+# system users (e.g., a news fetcher) get override roots they own and the
+# 'persmem' user has group-traversal access to. See README.
 
-# Per-agent mailbox root overrides. If an agent isn't listed here, their
-# mailbox lives under AMQ_ROOT/<agent>/inbox/ as before. The 'news' agent
-# lives outside /home/persmem so newstron9000 (which runs the fetcher and
-# digest) doesn't need group-traversal into persmem's home directory.
-AMQ_AGENT_ROOTS = {
-    "news": "/var/lib/persmem-amq",
-}
+AMQ_ROOT = os.environ.get("PERSMEM_AMQ_ROOT", "/var/lib/persmem-amq")
+AMQ_AGENTS = set(
+    a.strip().lower()
+    for a in os.environ.get("PERSMEM_AMQ_AGENTS", "agent1,agent2,agent3").split(",")
+    if a.strip()
+)
+
+try:
+    AMQ_AGENT_ROOTS = json.loads(os.environ.get("PERSMEM_AMQ_AGENT_ROOTS", "{}"))
+    if not isinstance(AMQ_AGENT_ROOTS, dict):
+        AMQ_AGENT_ROOTS = {}
+except (json.JSONDecodeError, ValueError):
+    AMQ_AGENT_ROOTS = {}
 
 
 def _amq_root_for(agent: str) -> str:
@@ -930,13 +955,14 @@ def amq_send(
     """
     Send a message to another agent via AMQ (atomic Maildir delivery).
 
-    Use this to communicate with the other named instance (Kite or Wren).
+    Use this to communicate with another named instance (any agent in
+    PERSMEM_AMQ_AGENTS).
     Messages are stored on the shared filesystem and picked up when
     the recipient calls amq_check/amq_read.
 
     Args:
-        from_agent: Your agent name (e.g., 'kite' or 'wren').
-        to_agent: Recipient agent name (e.g., 'wren' or 'kite').
+        from_agent: Your agent name (must be in PERSMEM_AMQ_AGENTS).
+        to_agent: Recipient agent name (must be in PERSMEM_AMQ_AGENTS).
         body: Message body (Markdown). This is the main content.
         subject: Short summary line.
         kind: Message type -- message, question, answer, review_request,
@@ -1008,7 +1034,7 @@ def amq_check(
     has sent you anything. Does NOT mark messages as read.
 
     Args:
-        agent: Your agent name (e.g., 'kite' or 'wren').
+        agent: Your agent name (must be in PERSMEM_AMQ_AGENTS).
     """
     agent = agent.lower().strip()
     if agent not in AMQ_AGENTS:
@@ -1054,7 +1080,7 @@ def amq_read(
     Read a specific message and mark it as read (moves from new to cur).
 
     Args:
-        agent: Your agent name (e.g., 'kite' or 'wren').
+        agent: Your agent name (must be in PERSMEM_AMQ_AGENTS).
         msg_id: The message ID to read (from amq_check results).
     """
     agent = agent.lower().strip()
@@ -1091,7 +1117,7 @@ def amq_history(
     Returns headers only (no body) -- use amq_read for full content.
 
     Args:
-        agent: Your agent name (e.g., 'kite' or 'wren').
+        agent: Your agent name (must be in PERSMEM_AMQ_AGENTS).
         limit: Max messages to return (default 10).
     """
     agent = agent.lower().strip()
@@ -1136,7 +1162,19 @@ def amq_history(
 # ---------------------------------------------------------------------------
 # Chorus Bootstrap — compound tool for session initialization
 # ---------------------------------------------------------------------------
-TRIAD_AGENTS = {"kite", "wren", "knot"}  # triad only, no 'news'
+# Triad agents = the human-instance agents (excludes service agents like 'news').
+# Configure via PERSMEM_TRIAD_AGENTS (comma-separated). Defaults to AMQ_AGENTS
+# minus any names listed in PERSMEM_AMQ_SERVICE_AGENTS.
+_default_service_agents = set(
+    a.strip().lower()
+    for a in os.environ.get("PERSMEM_AMQ_SERVICE_AGENTS", "news").split(",")
+    if a.strip()
+)
+_triad_env = os.environ.get("PERSMEM_TRIAD_AGENTS", "")
+if _triad_env.strip():
+    TRIAD_AGENTS = set(a.strip().lower() for a in _triad_env.split(",") if a.strip())
+else:
+    TRIAD_AGENTS = AMQ_AGENTS - _default_service_agents
 
 
 @mcp.tool()
@@ -1157,9 +1195,9 @@ def chorus_init(
     figure out which one you are.
 
     Args:
-        agent: Your agent name (e.g., 'kite', 'wren', 'knot'). Optional —
+        agent: Your agent name (must be in PERSMEM_TRIAD_AGENTS). Optional —
                omit if identity-confused after compaction.
-        project: Current project focus (e.g., 'dsvp-deck', 'persmem').
+        project: Current project focus (e.g., your project name).
     """
     agent = agent.lower().strip() if agent else ""
     result = {}
@@ -1352,7 +1390,7 @@ def bootstrap_update(
     Args:
         entry_id: The memory ID to update (e.g., 'mem-5a6bebdc9d5a1811').
         content: New full content for this entry.
-        tags: Comma-separated tags (e.g., 'identity,bootstrap,kite').
+        tags: Comma-separated tags (e.g., 'identity,bootstrap,agent1').
         entry_type: Entry type (identity, directive, state, focus).
         project: Project name (default 'triad').
     """

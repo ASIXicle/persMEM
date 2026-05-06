@@ -4,7 +4,7 @@ digest.py — Generate the daily newstron9000 digest.
 
 Pulls news items stored in the last 24h (or configurable window), groups
 by tier, writes a Maildir-style message to the shared `news` AMQ mailbox
-at /home/persmem/amq/news/inbox/new/ where Knot/Wren/Kite can read it
+at <PERSMEM_AMQ_ROOT>/news/inbox/new/ where the configured triad agents can read it
 via amq_check + amq_read.
 
 Template-only: no LLM summarization. Boring is honest.
